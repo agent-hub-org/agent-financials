@@ -1,0 +1,35 @@
+[project]
+name = "agent-financials"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "None"}
+]
+readme = "README.md"
+requires-python = ">=3.13,<4.0"
+dependencies = [
+    "agent-sdk @ file:///Users/pranjalverma/Documents/agent-financials/agent-sdk",
+    "yfinance (>=1.2.0,<2.0.0)",
+    "tavily-python (>=0.7.23,<0.8.0)",
+    "firecrawl-py (>=4.19.0,<5.0.0)",
+    "motor (>=3.7.1,<4.0.0)",
+    "fastapi (>=0.135.1,<0.136.0)",
+    "uvicorn[standard] (>=0.42.0,<0.43.0)",
+    "pinecone (>=8.1.0,<9.0.0)",
+    "langchain-text-splitters (>=1.1.1,<2.0.0)",
+    "langchain-google-genai (>=4.2.1,<5.0.0)",
+    "langchain-nvidia-ai-endpoints (>=1.2.1,<2.0.0)",
+    "mem0ai (>=1.0.5,<2.0.0)",
+    "tabulate (>=0.10.0,<0.11.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.dependencies]
+agent-sdk = {develop = true}
