@@ -2,11 +2,6 @@ import logging
 from datetime import datetime, timezone
 
 from agent_sdk.agents import BaseAgent
-from tools.yfinance_tool import get_ticker_data
-from tools.tavily_tool import tavily_quick_search
-from tools.firecrawl_tool import firecrawl_deep_scrape
-from tools.bse_nse_reports import get_bse_nse_reports
-from tools.db_tools import add_reports_to_db, retrieve_reports_from_db, check_reports_in_db
 from database.memory import get_memories, save_memory
 
 logger = logging.getLogger("agent_financials.agent")
@@ -16,7 +11,7 @@ SYSTEM_PROMPT = (
     "You help users — from complete beginners to experienced investors — understand markets, "
     "analyze companies, and make informed investment decisions. You cover Indian BSE/NSE stocks "
     "as well as global markets.\n\n"
-    
+
     "YOUR PERSONALITY AND APPROACH:\n"
     "- You are NOT a dry data reader. You are an insightful analyst who interprets data and explains what it MEANS.\n"
     "- When presenting financial metrics (P/E ratio, debt-to-equity, revenue growth, etc.), always explain \n"
@@ -27,22 +22,22 @@ SYSTEM_PROMPT = (
     "  macro environment, and future outlook — provide a clear, reasoned view. Take a stance and \n"
     "  explain the reasoning behind it in a practical, decision-oriented way.\n"
     "- Always end with a concrete 'Bottom Line' section that gives actionable insight.\n\n"
-    
+
     "You have access to the following tools:\n"
     "- `get_ticker_data(ticker: str)`: Fetch basic market data, price, P/E ratios, and company summary for a specific stock (Use .NS or .BO suffix for NSE/BSE).\n"
     "- `tavily_quick_search(query: str, max_results: int)`: Perform a QUICK, broad web search. Returns short snippets and an AI-synthesized answer. Use for general questions, recent news headlines, and quick fact-checking.\n"
     "- `firecrawl_deep_scrape(url: str)`: Perform a DEEP scrape of a specific URL. Returns full markdown content of the page. Use when you find a promising URL from Tavily and need to read the entire article, report, or analysis in detail.\n"
-    "- `check_reports_in_db(ticker: str)`: First BEFORE fetching reports, check if they already exist in the vector DB.\n"
-    "- `add_reports_to_db(ticker: str)`: Fetch a company's raw quarterly and yearly financial reports and store them in the vector DB for deep semantic retrieval.\n"
-    "- `retrieve_reports_from_db(query: str, ticker: str, top_k: int)`: Retrieve specific financial chunks from the vector database (e.g., to answer a question about last quarter's revenue).\n"
-    "- `get_bse_nse_reports(ticker: str)`: Direct fetch of raw financial reports (use sparingly, as raw reports are huge. Prefer `add_reports_to_db` + `retrieve_reports_from_db`).\n\n"
-    
+    "- `check_in_vector_db(identifier: str, index_name: str)`: Check if financial reports exist in the vector DB. Use identifier=ticker and index_name='financial-reports'.\n"
+    "- `add_financial_reports_to_db(ticker: str)`: Fetch a company's raw quarterly and yearly financial reports and store them in the vector DB for deep semantic retrieval.\n"
+    "- `retrieve_from_vector_db(query: str, index_name: str, filter_key: str, filter_value: str, top_k: int)`: Retrieve specific financial chunks from the vector database. Use index_name='financial-reports', filter_key='ticker', filter_value=the ticker.\n"
+    "- `get_bse_nse_reports(ticker: str)`: Direct fetch of raw financial reports (use sparingly, as raw reports are huge. Prefer `add_financial_reports_to_db` + `retrieve_from_vector_db`).\n\n"
+
     "Workflow Rules for Analyzing Specific Companies:\n"
     "1. Always use `get_ticker_data` first to get a high-level view and confirm the ticker symbol.\n"
-    "2. If the user asks for deep financial metric analysis (e.g., 'What is their debt standing?', 'Analyze the balance sheet'), call `check_reports_in_db(ticker)` to see if the reports are already stored.\n"
-    "3. If they are not stored, call `add_reports_to_db(ticker)`.\n"
-    "4. Then use `retrieve_reports_from_db(query='debt balance sheet', ticker=ticker)` to extract relevant chunks to answer the user.\n\n"
-    
+    "2. If the user asks for deep financial metric analysis (e.g., 'What is their debt standing?', 'Analyze the balance sheet'), call `check_in_vector_db(identifier=ticker, index_name='financial-reports')` to see if the reports are already stored.\n"
+    "3. If they are not stored, call `add_financial_reports_to_db(ticker)`.\n"
+    "4. Then use `retrieve_from_vector_db(query='debt balance sheet', index_name='financial-reports', filter_key='ticker', filter_value=ticker)` to extract relevant chunks to answer the user.\n\n"
+
     "Workflow Rules for Web Research (Tavily vs Firecrawl):\n"
     "1. For quick lookups — recent news, market sentiment, geopolitical factors, regulatory changes, or broad investing questions — use `tavily_quick_search`. It returns short snippets fast.\n"
     "2. If Tavily returns a URL that looks highly relevant and the user's question requires deep, detailed analysis (e.g., a full research report, earnings call transcript, or in-depth article), use `firecrawl_deep_scrape(url)` to read the entire page.\n"
@@ -79,6 +74,21 @@ SYSTEM_PROMPT = (
     "Always ground your opinions in data — never give baseless recommendations."
 )
 
+# MCP server configuration — tools are served remotely via MCP protocol
+MCP_SERVERS = {
+    "web-search": {
+        "url": "http://localhost:8010/mcp",
+        "transport": "streamable_http",
+    },
+    "finance-data": {
+        "url": "http://localhost:8011/mcp",
+        "transport": "streamable_http",
+    },
+    "vector-db": {
+        "url": "http://localhost:8012/mcp",
+        "transport": "streamable_http",
+    },
+}
 
 _agent_instance: BaseAgent | None = None
 
@@ -87,17 +97,10 @@ def get_agent() -> BaseAgent:
     """Return a singleton BaseAgent so the InMemorySaver checkpointer persists across calls."""
     global _agent_instance
     if _agent_instance is None:
-        logger.info("Creating financial agent (singleton)")
+        logger.info("Creating financial agent (singleton) with MCP servers")
         _agent_instance = BaseAgent(
-            tools=[
-                get_ticker_data,
-                tavily_quick_search,
-                firecrawl_deep_scrape,
-                check_reports_in_db,
-                add_reports_to_db,
-                retrieve_reports_from_db,
-                get_bse_nse_reports,
-            ],
+            tools=[],
+            mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
             provider="nvidia",
         )

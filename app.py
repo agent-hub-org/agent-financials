@@ -1,11 +1,13 @@
 import logging
 from contextlib import asynccontextmanager
 
+import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from agents.agent import run_query
+from agents.agent import get_agent, run_query
 from database.mongo import MongoDB
+from a2a.server import create_a2a_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,9 +19,15 @@ logger = logging.getLogger("agent_financials.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # MongoDB handles connections automatically, but we can call a close on shutdown
+    # Connect MCP servers on startup (triggers lazy init)
+    agent = get_agent()
+    await agent._ensure_initialized()
+    logger.info("MCP servers connected, agent ready")
     yield
+    # Disconnect MCP on shutdown
+    await agent._disconnect_mcp()
     await MongoDB.close()
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(
@@ -27,6 +35,10 @@ app = FastAPI(
     description="Ask investing questions, analyze stocks, and get AI-powered financial market insights.",
     lifespan=lifespan,
 )
+
+# Mount the A2A server as a sub-application
+a2a_app = create_a2a_app()
+app.mount("/a2a", a2a_app.build())
 
 
 class AskRequest(BaseModel):
@@ -88,3 +100,7 @@ async def get_history(session_id: str):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "agent-financials"}
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8080)
