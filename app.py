@@ -1,11 +1,13 @@
+import json
 import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from agents.agent import get_agent, run_query
+from agents.agent import get_agent, run_query, stream_query
 from database.mongo import MongoDB
 from a2a.server import create_a2a_app
 
@@ -87,6 +89,37 @@ async def ask(request: AskRequest):
         query=request.query,
         response=response,
     )
+
+
+@app.post("/ask/stream")
+async def ask_stream(request: AskRequest):
+    """Stream the agent's response as Server-Sent Events (SSE).
+
+    Each event is a JSON object with a `text` field containing a chunk.
+    The stream ends with a `[DONE]` sentinel.
+    """
+    session_id = request.session_id or MongoDB.generate_session_id()
+    logger.info("POST /ask/stream — session='%s', query='%s'", session_id, request.query[:100])
+
+    async def event_stream():
+        full_response = []
+        async for chunk in stream_query(request.query, session_id=session_id):
+            full_response.append(chunk)
+            yield f"data: {json.dumps({'text': chunk})}\n\n"
+
+        # Save to MongoDB after streaming completes
+        response_text = "".join(full_response)
+        await MongoDB.save_conversation(
+            session_id=session_id,
+            query=request.query,
+            response=response_text,
+            steps=[],
+        )
+
+        yield f"data: {json.dumps({'session_id': session_id})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/history/{session_id}", response_model=HistoryResponse)
