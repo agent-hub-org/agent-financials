@@ -4,7 +4,12 @@ import traceback
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import (
+    Artifact,
+    Part,
+    TaskArtifactUpdateEvent,
     TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
     TextPart,
     UnsupportedOperationError,
 )
@@ -24,9 +29,12 @@ class FinancialAgentExecutor(AgentExecutor):
         if not query:
             logger.error("No text content found in the request")
             await event_queue.enqueue_event(
-                task_id=context.task_id,
-                state=TaskState.failed,
-                parts=[TextPart(text="No text content found in the request.")],
+                TaskStatusUpdateEvent(
+                    task_id=context.task_id,
+                    context_id=context.context_id,
+                    final=True,
+                    status=TaskStatus(state=TaskState.failed),
+                )
             )
             return
 
@@ -37,16 +45,32 @@ class FinancialAgentExecutor(AgentExecutor):
             response_text = result["response"]
 
             await event_queue.enqueue_event(
-                task_id=context.task_id,
-                state=TaskState.completed,
-                parts=[TextPart(text=response_text)],
+                TaskArtifactUpdateEvent(
+                    task_id=context.task_id,
+                    context_id=context.context_id,
+                    artifact=Artifact(
+                        parts=[Part(root=TextPart(text=response_text))],
+                    ),
+                    last_chunk=True,
+                )
+            )
+            await event_queue.enqueue_event(
+                TaskStatusUpdateEvent(
+                    task_id=context.task_id,
+                    context_id=context.context_id,
+                    final=True,
+                    status=TaskStatus(state=TaskState.completed),
+                )
             )
         except Exception as e:
             logger.error("A2A execution failed: %s\n%s", e, traceback.format_exc())
             await event_queue.enqueue_event(
-                task_id=context.task_id,
-                state=TaskState.failed,
-                parts=[TextPart(text=f"Agent execution failed: {e}")],
+                TaskStatusUpdateEvent(
+                    task_id=context.task_id,
+                    context_id=context.context_id,
+                    final=True,
+                    status=TaskStatus(state=TaskState.failed),
+                )
             )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
