@@ -47,8 +47,10 @@ app.mount("/a2a", a2a_app.build())
 class AskRequest(BaseModel):
     query: str
     session_id: str | None = None
+    response_format: str | None = None
+    model_id: str | None = None
 
-    model_config = {"json_schema_extra": {"examples": [{"query": "Analyze RELIANCE.NS quarterly income statement.", "session_id": None}]}}
+    model_config = {"json_schema_extra": {"examples": [{"query": "Analyze RELIANCE.NS quarterly income statement.", "session_id": None, "response_format": "detailed", "model_id": None}]}}
 
 
 class AskResponse(BaseModel):
@@ -70,7 +72,8 @@ async def ask(request: AskRequest):
     logger.info("POST /ask — session='%s' (%s), query='%s'",
                 session_id, "new" if is_new else "existing", request.query[:100])
 
-    result = await run_query(request.query, session_id=session_id)
+    result = await run_query(request.query, session_id=session_id,
+                             response_format=request.response_format, model_id=request.model_id)
     response = result["response"]
     steps = result["steps"]
 
@@ -102,7 +105,8 @@ async def ask_stream(request: AskRequest):
     session_id = request.session_id or MongoDB.generate_session_id()
     logger.info("POST /ask/stream — session='%s', query='%s'", session_id, request.query[:100])
 
-    stream = create_stream(request.query, session_id=session_id)
+    stream = create_stream(request.query, session_id=session_id,
+                           response_format=request.response_format, model_id=request.model_id)
 
     async def event_stream():
         full_response = []

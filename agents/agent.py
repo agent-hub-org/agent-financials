@@ -114,8 +114,27 @@ def get_agent() -> BaseAgent:
     return _agent_instance
 
 
-def _build_enriched_prompt(session_id: str, query: str) -> str:
-    """Build system prompt enriched with date context and long-term memories."""
+RESPONSE_FORMAT_INSTRUCTIONS = {
+    "summary": (
+        "\n\nRESPONSE FORMAT OVERRIDE: The user wants a QUICK SUMMARY. "
+        "Keep your response concise — 5-7 bullet points maximum covering the key metrics, "
+        "one-line interpretation of each, and a 2-sentence bottom line. "
+        "Skip detailed section headers, long explanations, and tables."
+    ),
+    "flash_cards": (
+        "\n\nRESPONSE FORMAT OVERRIDE: The user wants FLASH CARDS. "
+        "Format your entire response as a series of flash cards using this format:\n"
+        "**Q:** [question about a key concept/metric]\n"
+        "**A:** [concise answer with the data point and what it means]\n\n"
+        "Generate 8-12 flash cards covering the most important financial metrics, "
+        "risks, strengths, and the bottom-line investment view."
+    ),
+    "detailed": "",  # default — uses the full system prompt format as-is
+}
+
+
+def _build_enriched_prompt(session_id: str, query: str, response_format: str | None = None) -> str:
+    """Build system prompt enriched with date context, memories, and response format."""
     memories = get_memories(user_id=session_id, query=query)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -128,27 +147,31 @@ def _build_enriched_prompt(session_id: str, query: str) -> str:
         f"instead of just 'HDFC Bank Q4 results')."
     )
 
+    enriched_prompt = SYSTEM_PROMPT + date_block
+
     if memories:
         memory_block = "\n".join(f"- {m}" for m in memories)
-        enriched_prompt = (
-            SYSTEM_PROMPT
-            + date_block
-            + f"\n\nCONTEXT ABOUT THIS USER (from long-term memory, use this to personalize your response):\n{memory_block}"
-        )
+        enriched_prompt += f"\n\nCONTEXT ABOUT THIS USER (from long-term memory, use this to personalize your response):\n{memory_block}"
         logger.info("Injected %d memories into system_prompt for session='%s'", len(memories), session_id)
-    else:
-        enriched_prompt = SYSTEM_PROMPT + date_block
+
+    # Append response format instructions
+    format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
+    if format_instruction:
+        enriched_prompt += format_instruction
+        logger.info("Applied response format '%s' for session='%s'", response_format, session_id)
 
     return enriched_prompt
 
 
-async def run_query(query: str, session_id: str = "default") -> dict:
-    logger.info("run_query called — session='%s', query='%s'", session_id, query[:100])
+async def run_query(query: str, session_id: str = "default",
+                    response_format: str | None = None, model_id: str | None = None) -> dict:
+    logger.info("run_query called — session='%s', query='%s', model='%s'",
+                session_id, query[:100], model_id or "default")
 
-    enriched_prompt = _build_enriched_prompt(session_id, query)
+    enriched_prompt = _build_enriched_prompt(session_id, query, response_format=response_format)
 
     agent = get_agent()
-    result = await agent.arun(query, session_id=session_id, system_prompt=enriched_prompt)
+    result = await agent.arun(query, session_id=session_id, system_prompt=enriched_prompt, model_id=model_id)
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     save_memory(user_id=session_id, query=query, response=result["response"])
@@ -156,20 +179,15 @@ async def run_query(query: str, session_id: str = "default") -> dict:
     return result
 
 
-def create_stream(query: str, session_id: str = "default"):
-    """Create a StreamResult for the query. Returns the stream object directly.
+def create_stream(query: str, session_id: str = "default",
+                  response_format: str | None = None, model_id: str | None = None):
+    """Create a StreamResult for the query. Returns the stream object directly."""
+    logger.info("create_stream called — session='%s', query='%s', model='%s'",
+                session_id, query[:100], model_id or "default")
 
-    Usage:
-        stream = create_stream(query, session_id)
-        async for chunk in stream:
-            # send chunk
-        steps = stream.steps  # available after iteration
-    """
-    logger.info("create_stream called — session='%s', query='%s'", session_id, query[:100])
-
-    enriched_prompt = _build_enriched_prompt(session_id, query)
+    enriched_prompt = _build_enriched_prompt(session_id, query, response_format=response_format)
     agent = get_agent()
-    return agent.astream(query, session_id=session_id, system_prompt=enriched_prompt)
+    return agent.astream(query, session_id=session_id, system_prompt=enriched_prompt, model_id=model_id)
 
 
 async def stream_query(query: str, session_id: str = "default"):
