@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from agents.agent import get_agent, run_query, stream_query
+from agents.agent import get_agent, run_query, stream_query, create_stream
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 
@@ -102,19 +102,24 @@ async def ask_stream(request: AskRequest):
     session_id = request.session_id or MongoDB.generate_session_id()
     logger.info("POST /ask/stream — session='%s', query='%s'", session_id, request.query[:100])
 
+    stream = create_stream(request.query, session_id=session_id)
+
     async def event_stream():
         full_response = []
-        async for chunk in stream_query(request.query, session_id=session_id):
+        async for chunk in stream:
             full_response.append(chunk)
             yield f"data: {json.dumps({'text': chunk})}\n\n"
 
-        # Save to MongoDB after streaming completes
+        # Save to MongoDB with steps tracked during streaming
         response_text = "".join(full_response)
+        from agents.agent import save_memory
+        save_memory(user_id=session_id, query=request.query, response=response_text)
+
         await MongoDB.save_conversation(
             session_id=session_id,
             query=request.query,
             response=response_text,
-            steps=[],
+            steps=stream.steps,
         )
 
         yield f"data: {json.dumps({'session_id': session_id})}\n\n"
