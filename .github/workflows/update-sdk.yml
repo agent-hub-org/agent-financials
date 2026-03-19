@@ -10,19 +10,27 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Update submodule to new tag
+        run: |
+          cd agent-sdk
+          git fetch --tags
+          git checkout ${{ github.event.client_payload.tag }}
 
       - name: Install Poetry
         run: pip install poetry
 
-      - name: Update SDK to new tag
-        run: |
-          poetry add git+https://github.com/pranjalv23/agent-sdk.git#${{ github.event.client_payload.tag }}
+      - name: Update lock file
+        run: poetry lock --no-update
 
       - name: Commit changes
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add pyproject.toml poetry.lock
+          git add agent-sdk poetry.lock
           git commit -m "update sdk to ${{ github.event.client_payload.tag }}" || echo "No changes"
           git push
 

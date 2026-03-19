@@ -32,5 +32,7 @@ FINANCIAL_AGENT_CARD = AgentCard(
             tags=["research", "news", "market-trends", "investing"],
         ),
     ],
+    defaultInputModes=["text"],
+    defaultOutputModes=["text"],
     capabilities=AgentCapabilities(streaming=False, pushNotifications=False),
 )

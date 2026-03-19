@@ -15,9 +15,8 @@ def create_a2a_app() -> A2AStarletteApplication:
     task_store = InMemoryTaskStore()
     executor = FinancialAgentExecutor()
     request_handler = DefaultRequestHandler(
-        agent_card=FINANCIAL_AGENT_CARD,
+        agent_executor=executor,
         task_store=task_store,
-        executor=executor,
     )
     a2a_app = A2AStarletteApplication(
         agent_card=FINANCIAL_AGENT_CARD,
