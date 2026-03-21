@@ -110,6 +110,7 @@ def get_agent() -> BaseAgent:
             system_prompt=SYSTEM_PROMPT,
             provider="nvidia",
             checkpointer=_get_checkpointer(),
+            mode="financial_analyst",
         )
     return _agent_instance
 
