@@ -85,7 +85,7 @@ MCP_SERVERS = {
     },
 }
 
-_agent_instance: BaseAgent | None = None
+_agent_instances: dict[str, BaseAgent] = {}
 _checkpointer: AsyncMongoDBSaver | None = None
 
 
@@ -99,20 +99,19 @@ def _get_checkpointer() -> AsyncMongoDBSaver:
     return _checkpointer
 
 
-def get_agent() -> BaseAgent:
-    """Return a singleton BaseAgent so the checkpointer persists across calls."""
-    global _agent_instance
-    if _agent_instance is None:
-        logger.info("Creating financial agent (singleton) with MCP servers")
-        _agent_instance = BaseAgent(
+def get_agent(mode: str = "financial_analyst") -> BaseAgent:
+    """Return a per-mode singleton BaseAgent so the checkpointer persists across calls."""
+    if mode not in _agent_instances:
+        logger.info("Creating agent singleton (mode=%s) with MCP servers", mode)
+        _agent_instances[mode] = BaseAgent(
             tools=[],
             mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
             provider="nvidia",
             checkpointer=_get_checkpointer(),
-            mode="financial_analyst",
+            mode=mode,
         )
-    return _agent_instance
+    return _agent_instances[mode]
 
 
 RESPONSE_FORMAT_INSTRUCTIONS = {
@@ -172,13 +171,14 @@ def _build_enriched_prompt(session_id: str, query: str, response_format: str | N
 
 
 async def run_query(query: str, session_id: str = "default",
-                    response_format: str | None = None, model_id: str | None = None) -> dict:
-    logger.info("run_query called — session='%s', query='%s', model='%s'",
-                session_id, query[:100], model_id or "default")
+                    response_format: str | None = None, model_id: str | None = None,
+                    mode: str = "financial_analyst") -> dict:
+    logger.info("run_query called — session='%s', query='%s', model='%s', mode='%s'",
+                session_id, query[:100], model_id or "default", mode)
 
     enriched_prompt = _build_enriched_prompt(session_id, query, response_format=response_format)
 
-    agent = get_agent()
+    agent = get_agent(mode)
     result = await agent.arun(query, session_id=session_id, system_prompt=enriched_prompt, model_id=model_id)
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
@@ -188,13 +188,14 @@ async def run_query(query: str, session_id: str = "default",
 
 
 def create_stream(query: str, session_id: str = "default",
-                  response_format: str | None = None, model_id: str | None = None):
+                  response_format: str | None = None, model_id: str | None = None,
+                  mode: str = "financial_analyst"):
     """Create a StreamResult for the query. Returns the stream object directly."""
-    logger.info("create_stream called — session='%s', query='%s', model='%s'",
-                session_id, query[:100], model_id or "default")
+    logger.info("create_stream called — session='%s', query='%s', model='%s', mode='%s'",
+                session_id, query[:100], model_id or "default", mode)
 
     enriched_prompt = _build_enriched_prompt(session_id, query, response_format=response_format)
-    agent = get_agent()
+    agent = get_agent(mode)
     return agent.astream(query, session_id=session_id, system_prompt=enriched_prompt, model_id=model_id)
 
 

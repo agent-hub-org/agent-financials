@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from agents.agent import get_agent, run_query, stream_query, create_stream
+from agents.agent import _agent_instances, get_agent, run_query, stream_query, create_stream
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 
@@ -22,13 +22,15 @@ logger = logging.getLogger("agent_financials.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Connect MCP servers on startup (triggers lazy init)
-    agent = get_agent()
-    await agent._ensure_initialized()
-    logger.info("MCP servers connected, agent ready")
+    # Connect MCP servers on startup for both modes
+    for mode in ("standard", "financial_analyst"):
+        agent = get_agent(mode)
+        await agent._ensure_initialized()
+        logger.info("MCP servers connected, agent ready (mode=%s)", mode)
     yield
-    # Disconnect MCP on shutdown
-    await agent._disconnect_mcp()
+    # Disconnect MCP on shutdown for all initialized agents
+    for agent in list(_agent_instances.values()):
+        await agent._disconnect_mcp()
     await MongoDB.close()
     logger.info("Shutdown complete")
 
@@ -49,8 +51,9 @@ class AskRequest(BaseModel):
     session_id: str | None = None
     response_format: str | None = None
     model_id: str | None = None
+    mode: str = "financial_analyst"  # "standard" or "financial_analyst"
 
-    model_config = {"json_schema_extra": {"examples": [{"query": "Analyze RELIANCE.NS quarterly income statement.", "session_id": None, "response_format": "detailed", "model_id": None}]}}
+    model_config = {"json_schema_extra": {"examples": [{"query": "Analyze RELIANCE.NS quarterly income statement.", "session_id": None, "response_format": "detailed", "model_id": None, "mode": "financial_analyst"}]}}
 
 
 class AskResponse(BaseModel):
@@ -73,7 +76,8 @@ async def ask(request: AskRequest):
                 session_id, "new" if is_new else "existing", request.query[:100])
 
     result = await run_query(request.query, session_id=session_id,
-                             response_format=request.response_format, model_id=request.model_id)
+                             response_format=request.response_format, model_id=request.model_id,
+                             mode=request.mode)
     response = result["response"]
     steps = result["steps"]
 
@@ -106,7 +110,8 @@ async def ask_stream(request: AskRequest):
     logger.info("POST /ask/stream — session='%s', query='%s'", session_id, request.query[:100])
 
     stream = create_stream(request.query, session_id=session_id,
-                           response_format=request.response_format, model_id=request.model_id)
+                           response_format=request.response_format, model_id=request.model_id,
+                           mode=request.mode)
 
     async def event_stream():
         full_response = []
