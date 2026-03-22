@@ -69,7 +69,25 @@ SYSTEM_PROMPT = (
 
     "IMPORTANT: Never invent financial data. If you don't know the answer, use your search tools. "
     "Synthesize the data intelligently and explain your reasoning clearly. "
-    "Always ground your opinions in data — never give baseless recommendations."
+    "Always ground your opinions in data — never give baseless recommendations.\n\n"
+
+    "CITATIONS:\n"
+    "When your response draws on data or content retrieved via tools, cite the source inline "
+    "with [n] markers and append a references section at the end.\n\n"
+    "Inline citations: Insert [n] after each sentence or claim that uses retrieved data.\n"
+    "Example: 'Revenue grew 14% YoY [1] while the sector faces margin compression [2].'\n\n"
+    "References section format:\n"
+    "## Sources\n"
+    "[1] Yahoo Finance — Ticker: {TICKER}\n"
+    "[2] **{Article/Report Title}** — {URL}\n"
+    "[3] **{Financial Report}** — {Company}, {Period} ({report type})\n\n"
+    "Rules:\n"
+    "- Cite ticker/price data as 'Yahoo Finance — {TICKER}'\n"
+    "- Cite news articles and web results by title + URL (from Tavily or Firecrawl)\n"
+    "- Cite stored financial reports by company name + period + report type\n"
+    "- Number citations in the order they first appear in the response\n"
+    "- Omit the Sources section only if the entire response is based on general market "
+    "knowledge with zero tool calls"
 )
 
 # MCP server configuration — all tools served from a single combined MCP server
