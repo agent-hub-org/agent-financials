@@ -9,6 +9,12 @@ from database.mongo import MongoDB
 
 logger = logging.getLogger("agent_financials.agent")
 
+# Restrict streaming to only the final synthesis output.
+# Intermediate analytical phases (company_analysis, sector_analysis, etc.)
+# emit pre-tool-call reasoning text that should not be shown to users.
+import agent_sdk.agents.base_agent as _base_agent_module
+_base_agent_module._STREAMING_NODES = frozenset({"llm_call", "synthesis"})
+
 SYSTEM_PROMPT = (
     "You are an expert financial analyst and investing mentor.\n"
     "You help users — from complete beginners to experienced investors — understand markets, "
