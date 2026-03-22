@@ -31,9 +31,9 @@ def get_memories(user_id: str, query: str) -> list[str]:
             query=query,
             version="v2",
             filters={"user_id": user_id},
-            limit=10,
+            limit=5,
         )
-        memories = [r["memory"] for r in results.get("results", []) if r.get("memory")]
+        memories = [r["memory"][:300] for r in results.get("results", []) if r.get("memory")]
         if memories:
             logger.info("Retrieved %d memories for user='%s'", len(memories), user_id)
         else:

@@ -33,28 +33,17 @@ SYSTEM_PROMPT = (
     "- Always end with a concrete 'Bottom Line' section that gives actionable insight.\n\n"
 
     "You have access to the following tools:\n"
-    "- `get_ticker_data(ticker: str)`: Fetch basic market data, price, P/E ratios, and company summary for a specific stock (Use .NS or .BO suffix for NSE/BSE).\n"
-    "- `tavily_quick_search(query: str, max_results: int)`: Perform a QUICK, broad web search. Returns short snippets and an AI-synthesized answer. Use for general questions, recent news headlines, and quick fact-checking.\n"
-    "- `firecrawl_deep_scrape(url: str)`: Perform a DEEP scrape of a specific URL. Returns full markdown content of the page. Use when you find a promising URL from Tavily and need to read the entire article, report, or analysis in detail.\n"
-    "- `check_in_vector_db(identifier: str, index_name: str)`: Check if financial reports exist in the vector DB. Use identifier=ticker and index_name='financial-reports'.\n"
-    "- `add_financial_reports_to_db(ticker: str)`: Fetch a company's raw quarterly and yearly financial reports and store them in the vector DB for deep semantic retrieval.\n"
-    "- `retrieve_from_vector_db(query: str, index_name: str, filter_key: str, filter_value: str, top_k: int)`: Retrieve specific financial chunks from the vector database. Use index_name='financial-reports', filter_key='ticker', filter_value=the ticker.\n"
-    "- `get_bse_nse_reports(ticker: str)`: Direct fetch of raw financial reports (use sparingly, as raw reports are huge. Prefer `add_financial_reports_to_db` + `retrieve_from_vector_db`).\n\n"
+    "- `get_ticker_data`: Fetch basic market data, price, P/E ratios, and company summary. Use .NS or .BO suffix for NSE/BSE stocks.\n"
+    "- `tavily_quick_search`: QUICK web search returning short snippets and an AI-synthesized answer. Use for recent news, headlines, and quick fact-checking.\n"
+    "- `firecrawl_deep_scrape`: DEEP scrape of a specific URL returning full markdown content. Use when Tavily finds a promising URL that needs full reading.\n"
+    "- `check_in_vector_db`: Check if financial reports exist in the vector DB (identifier=ticker, index_name='financial-reports').\n"
+    "- `add_financial_reports_to_db`: Fetch and store a company's quarterly and yearly financial reports in the vector DB.\n"
+    "- `retrieve_from_vector_db`: Retrieve financial chunks (index_name='financial-reports', filter_key='ticker', filter_value=ticker).\n"
+    "- `get_bse_nse_reports`: Direct fetch of raw reports (use sparingly — prefer `add_financial_reports_to_db` + `retrieve_from_vector_db`).\n\n"
 
-    "Workflow Rules for Analyzing Specific Companies:\n"
-    "1. Always use `get_ticker_data` first to get a high-level view and confirm the ticker symbol.\n"
-    "2. If the user asks for deep financial metric analysis (e.g., 'What is their debt standing?', 'Analyze the balance sheet'), call `check_in_vector_db(identifier=ticker, index_name='financial-reports')` to see if the reports are already stored.\n"
-    "3. If they are not stored, call `add_financial_reports_to_db(ticker)`.\n"
-    "4. Then use `retrieve_from_vector_db(query='debt balance sheet', index_name='financial-reports', filter_key='ticker', filter_value=ticker)` to extract relevant chunks to answer the user.\n\n"
-
-    "Workflow Rules for Web Research (Tavily vs Firecrawl):\n"
-    "1. For quick lookups — recent news, market sentiment, geopolitical factors, regulatory changes, or broad investing questions — use `tavily_quick_search`. It returns short snippets fast.\n"
-    "2. If Tavily returns a URL that looks highly relevant and the user's question requires deep, detailed analysis (e.g., a full research report, earnings call transcript, or in-depth article), use `firecrawl_deep_scrape(url)` to read the entire page.\n"
-    "3. Typical pattern: `tavily_quick_search` first to discover sources → `firecrawl_deep_scrape` on the best URL for comprehensive reading.\n"
-    "4. For broad questions like macro-economic outlook, government policies, trade wars, or sector-level trends, start with `tavily_quick_search`.\n\n"
-
-    "Workflow Rules for General Advice:\n"
-    "1. For questions like 'How do I start investing?', use `tavily_quick_search` to find advice if you need the latest guidance.\n\n"
+    "Tool Usage:\n"
+    "- Company deep-dive: `get_ticker_data` first → `check_in_vector_db` → `add_financial_reports_to_db` if not stored → `retrieve_from_vector_db` for specific chunks.\n"
+    "- Research and news: `tavily_quick_search` first to discover sources → `firecrawl_deep_scrape` on the best URL for full content. Use for macro-economic outlook, policies, sector trends, recent news, and general investing questions.\n\n"
 
     "RESPONSE FORMAT RULES:\n"
     "1. Structure your response with clear sections using markdown headers. Recommended structure for stock analysis:\n"
@@ -146,34 +135,31 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
 }
 
 
-def _build_enriched_prompt(session_id: str, query: str, response_format: str | None = None) -> str:
-    """Build system prompt enriched with date context, memories, and response format."""
+def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None) -> str:
+    """Build dynamic context block (date, memories, format instructions) to prepend to the user query."""
     memories = get_memories(user_id=session_id, query=query)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    year = datetime.now(timezone.utc).year
-    date_block = (
-        f"\n\nTODAY'S DATE: {today}\n"
-        f"Always use this date as your reference for 'current', 'recent', 'latest', etc. "
-        f"When searching with tavily_quick_search, include the current year ({year}) in your "
-        f"search queries to ensure you get up-to-date results (e.g., 'HDFC Bank Q4 {year} results' "
-        f"instead of just 'HDFC Bank Q4 results')."
+    year = today[:4]
+
+    parts = []
+    parts.append(
+        f"Today's date: {today}. When using tavily_quick_search include the current year "
+        f"({year}) in search queries (e.g. 'HDFC Bank Q4 {year} results')."
     )
 
-    enriched_prompt = SYSTEM_PROMPT + date_block
-
     if memories:
-        memory_block = "\n".join(f"- {m}" for m in memories)
-        enriched_prompt += f"\n\nCONTEXT ABOUT THIS USER (from long-term memory, use this to personalize your response):\n{memory_block}"
-        logger.info("Injected %d memories into system_prompt for session='%s'", len(memories), session_id)
+        memory_lines = "\n".join(f"- {m}" for m in memories)
+        parts.append(f"User context (long-term memory):\n{memory_lines}")
+        logger.info("Injected %d memories into context for session='%s'", len(memories), session_id)
 
-    # Append response format instructions
     format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
     if format_instruction:
-        enriched_prompt += format_instruction
+        parts.append(format_instruction.strip())
         logger.info("Applied response format '%s' for session='%s'", response_format, session_id)
 
-    return enriched_prompt
+    context_block = "\n\n".join(parts)
+    return f"[CONTEXT]\n{context_block}\n[/CONTEXT]\n\n"
 
 
 async def run_query(query: str, session_id: str = "default",
@@ -182,10 +168,11 @@ async def run_query(query: str, session_id: str = "default",
     logger.info("run_query called — session='%s', query='%s', model='%s', mode='%s'",
                 session_id, query[:100], model_id or "default", mode)
 
-    enriched_prompt = _build_enriched_prompt(session_id, query, response_format=response_format)
+    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format)
+    enriched_query = dynamic_context + query
 
     agent = get_agent(mode)
-    result = await agent.arun(query, session_id=session_id, system_prompt=enriched_prompt, model_id=model_id)
+    result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     save_memory(user_id=session_id, query=query, response=result["response"])
@@ -200,21 +187,23 @@ def create_stream(query: str, session_id: str = "default",
     logger.info("create_stream called — session='%s', query='%s', model='%s', mode='%s'",
                 session_id, query[:100], model_id or "default", mode)
 
-    enriched_prompt = _build_enriched_prompt(session_id, query, response_format=response_format)
+    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format)
+    enriched_query = dynamic_context + query
     agent = get_agent(mode)
-    return agent.astream(query, session_id=session_id, system_prompt=enriched_prompt, model_id=model_id)
+    return agent.astream(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
 
 
 async def stream_query(query: str, session_id: str = "default"):
     """Async generator that yields text chunks for SSE streaming."""
     logger.info("stream_query called — session='%s', query='%s'", session_id, query[:100])
 
-    enriched_prompt = _build_enriched_prompt(session_id, query)
+    dynamic_context = _build_dynamic_context(session_id, query)
+    enriched_query = dynamic_context + query
 
     agent = get_agent()
     full_response = []
 
-    async for chunk in agent.astream(query, session_id=session_id, system_prompt=enriched_prompt):
+    async for chunk in agent.astream(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT):
         full_response.append(chunk)
         yield chunk
 
