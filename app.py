@@ -160,30 +160,41 @@ async def ask_stream(request: AskRequest, http_request: Request):
 
     async def event_stream():
         full_response = []
-        async for chunk in stream:
-            full_response.append(chunk)
-            yield f"data: {json.dumps({'text': chunk})}\n\n"
+        try:
+            try:
+                async for chunk in stream:
+                    full_response.append(chunk)
+                    yield f"data: {json.dumps({'text': chunk})}\n\n"
+            except Exception as e:
+                logger.error("Stream failed: %s", e)
+                fallback = "\n\n[An error occurred while generating the response.]"
+                yield f"data: {json.dumps({'text': fallback})}\n\n"
+                full_response.append(fallback)
 
-        # Save to MongoDB with steps tracked during streaming
-        response_text = "".join(full_response)
+            # Save to MongoDB with steps tracked during streaming
+            response_text = "".join(full_response)
 
-        if not response_text.strip():
-            fallback = "Sorry, the model returned an empty response. Please try again or switch to a different model."
-            yield f"data: {json.dumps({'text': fallback})}\n\n"
-            response_text = fallback
+            if not response_text.strip():
+                fallback = "Sorry, the model returned an empty response. Please try again or switch to a different model."
+                yield f"data: {json.dumps({'text': fallback})}\n\n"
+                response_text = fallback
 
-        save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
+            try:
+                save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
 
-        await MongoDB.save_conversation(
-            session_id=session_id,
-            query=request.query,
-            response=response_text,
-            steps=stream.steps,
-            user_id=user_id,
-        )
+                await MongoDB.save_conversation(
+                    session_id=session_id,
+                    query=request.query,
+                    response=response_text,
+                    steps=stream.steps,
+                    user_id=user_id,
+                )
+            except Exception as e:
+                logger.error("Failed to save memory/conversation: %s", e)
 
-        yield f"data: {json.dumps({'session_id': session_id})}\n\n"
-        yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps({'session_id': session_id})}\n\n"
+        finally:
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
