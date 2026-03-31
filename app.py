@@ -9,7 +9,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agents.agent import _agent_instances, get_agent, run_query, stream_query, create_stream, save_memory
-from database.auth import AuthDB
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 
@@ -23,8 +22,6 @@ logger = logging.getLogger("agent_financials.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure unique index on users collection
-    await AuthDB.ensure_index()
     # Connect MCP servers on startup for both modes
     for mode in ("standard", "financial_analyst"):
         agent = get_agent(mode)
@@ -68,42 +65,6 @@ class AskResponse(BaseModel):
 class HistoryResponse(BaseModel):
     session_id: str
     history: list[dict]
-
-
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-class AuthResponse(BaseModel):
-    user_id: str
-    email: str
-
-
-# ── Auth endpoints ──
-
-@app.post("/auth/register", response_model=AuthResponse)
-async def register(request: RegisterRequest):
-    existing = await AuthDB.get_user_by_email(request.email)
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
-    user = await AuthDB.create_user(request.email, request.password)
-    logger.info("Registered user email='%s'", user["email"])
-    return AuthResponse(user_id=user["user_id"], email=user["email"])
-
-
-@app.post("/auth/login", response_model=AuthResponse)
-async def login(request: LoginRequest):
-    user = await AuthDB.get_user_by_email(request.email)
-    if not user or not AuthDB.verify_password(request.password, user["password_hash"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-    logger.info("Login user='%s'", user["user_id"])
-    return AuthResponse(user_id=user["user_id"], email=user["email"])
 
 
 # ── Agent endpoints ──
