@@ -26,3 +26,4 @@ jobs:
             docker compose build --no-cache agent-financials
             docker compose up -d --no-deps agent-financials
             docker image prune -f
+            docker compose restart agent-marketplace
