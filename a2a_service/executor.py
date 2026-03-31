@@ -41,7 +41,7 @@ class FinancialAgentExecutor(AgentExecutor):
         session_id = context.context_id or context.task_id
 
         try:
-            result = await run_query(query, session_id=session_id)
+            result = await run_query(query, session_id=session_id, user_id=session_id, mode="financial_analyst")
             response_text = result["response"]
 
             await event_queue.enqueue_event(
