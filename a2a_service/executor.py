@@ -38,10 +38,15 @@ class FinancialAgentExecutor(AgentExecutor):
             )
             return
 
-        session_id = context.context_id or context.task_id
+        task_metadata = getattr(context, "task", {}).get("metadata", {}) if hasattr(context, "task") else {}
+        user_id = task_metadata.get("user_id") or context.context_id or context.task_id
+        mode = task_metadata.get("mode") or "financial_analyst"
+
+        logger.info("A2A execute — task_id='%s', user_id='%s', mode='%s'", 
+                    context.task_id, user_id, mode)
 
         try:
-            result = await run_query(query, session_id=session_id, user_id=session_id, mode="financial_analyst")
+            result = await run_query(query, session_id=session_id, user_id=user_id, mode=mode)
             response_text = result["response"]
 
             await event_queue.enqueue_event(
