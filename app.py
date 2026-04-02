@@ -16,6 +16,7 @@ from slowapi.util import get_remote_address
 from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
+from charts.data import fetch_chart_data, VALID_PERIODS
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -205,6 +206,26 @@ async def get_history(session_id: str):
     history = await MongoDB.get_history(session_id)
     logger.info("Returning %d history entries for session='%s'", len(history), session_id)
     return HistoryResponse(session_id=session_id, history=history)
+
+
+@app.get("/charts/{ticker}")
+async def get_chart_data(ticker: str, period: str = "1y"):
+    """Return OHLCV history and technical indicators for a ticker — no LLM involved.
+    period: 1mo | 3mo | 6mo | 1y | 2y | 5y (default: 1y)
+    For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g., RELIANCE.NS"""
+    if period not in VALID_PERIODS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid period '{period}'. Valid options: {sorted(VALID_PERIODS)}",
+        )
+    logger.info("GET /charts/%s?period=%s", ticker, period)
+    try:
+        data = fetch_chart_data(ticker, period)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    return data
 
 
 @app.get("/health")
