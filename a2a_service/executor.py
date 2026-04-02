@@ -41,8 +41,9 @@ class FinancialAgentExecutor(AgentExecutor):
         task_metadata = getattr(context, "task", {}).get("metadata", {}) if hasattr(context, "task") else {}
         user_id = task_metadata.get("user_id") or context.context_id or context.task_id
         mode = task_metadata.get("mode") or "financial_analyst"
+        session_id = context.context_id or context.task_id
 
-        logger.info("A2A execute — task_id='%s', user_id='%s', mode='%s'", 
+        logger.info("A2A execute — task_id='%s', user_id='%s', mode='%s'",
                     context.task_id, user_id, mode)
 
         try:
