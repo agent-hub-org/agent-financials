@@ -300,12 +300,11 @@ async def delete_watchlist(watchlist_id: str, request: Request):
 
 @app.get("/health")
 async def health():
-    from database.memory import get_memories
-    _, mem_error = get_memories(user_id="_health_check_", query="ping")
+    # Skip Mem0 check for health endpoint — health checks run frequently and don't need memory validation
+    # Mem0 connectivity is only verified during actual user requests
     return {
         "status": "ok",
         "service": "agent-financials",
-        "mem0": "degraded" if mem_error else "ok",
     }
 
 
