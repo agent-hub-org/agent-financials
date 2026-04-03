@@ -8,12 +8,12 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory
+from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, _fix_flash_card_format, get_session_lock
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from charts.data import fetch_chart_data, VALID_PERIODS
@@ -35,7 +35,14 @@ _handler.setFormatter(_JsonFormatter())
 logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 logging.root.addHandler(_handler)
 logger = logging.getLogger("agent_financials.api")
-limiter = Limiter(key_func=get_remote_address)
+
+def get_remote_address_or_user(request: Request) -> str:
+    user_id = request.headers.get("X-User-Id")
+    if user_id:
+        return f"user:{user_id}"
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=get_remote_address_or_user)
 
 
 @asynccontextmanager
@@ -73,13 +80,23 @@ app.mount("/a2a", a2a_app.build())
 
 
 class AskRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=5000)
     session_id: str | None = None
-    response_format: str | None = None
+    response_format: str | None = Field(default=None, pattern="^(summary|flash_cards|detailed)$")
     model_id: str | None = None
-    mode: str = "financial_analyst"  # "standard" or "financial_analyst"
+    mode: str = Field(default="financial_analyst", pattern="^(standard|financial_analyst)$")
+    watchlist_id: str | None = None
+    as_of_date: str | None = None
 
     model_config = {"json_schema_extra": {"examples": [{"query": "Analyze RELIANCE.NS quarterly income statement.", "session_id": None, "response_format": "detailed", "model_id": None, "mode": "financial_analyst"}]}}
+
+class WatchlistCreate(BaseModel):
+    name: str
+    tickers: list[str]
+
+class WatchlistUpdate(BaseModel):
+    name: str | None = None
+    tickers: list[str] | None = None
 
 
 class AskResponse(BaseModel):
@@ -107,7 +124,8 @@ async def ask(body: AskRequest, request: Request):
 
     result = await run_query(body.query, session_id=session_id,
                              response_format=body.response_format, model_id=body.model_id,
-                             mode=body.mode, user_id=user_id)
+                             mode=body.mode, user_id=user_id,
+                             watchlist_id=body.watchlist_id, as_of_date=body.as_of_date)
     response = result["response"]
     steps = result["steps"]
 
@@ -143,17 +161,28 @@ async def ask_stream(body: AskRequest, request: Request):
     logger.info("POST /ask/stream — session='%s', user='%s', query='%s'",
                 session_id, user_id or "anonymous", body.query[:100])
 
-    stream = create_stream(body.query, session_id=session_id,
+    stream = await create_stream(body.query, session_id=session_id,
                            response_format=body.response_format, model_id=body.model_id,
-                           mode=body.mode, user_id=user_id)
+                           mode=body.mode, user_id=user_id,
+                           watchlist_id=body.watchlist_id, as_of_date=body.as_of_date)
+
+    _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
 
     async def event_stream():
         full_response = []
         try:
             try:
-                async for chunk in stream:
-                    full_response.append(chunk)
-                    yield f"data: {json.dumps({'text': chunk})}\n\n"
+                import asyncio
+                async with get_session_lock(session_id):
+                    async with asyncio.timeout(_STREAM_TIMEOUT):
+                        async for chunk in stream:
+                            full_response.append(chunk)
+                            yield f"data: {json.dumps({'text': chunk})}\n\n"
+            except TimeoutError:
+                logger.error("Stream timed out after %.0fs for session='%s'", _STREAM_TIMEOUT, session_id)
+                fallback = f"\n\n[Response timed out after {_STREAM_TIMEOUT:.0f} seconds. Please try a simpler query.]"
+                yield f"data: {json.dumps({'text': fallback})}\n\n"
+                full_response.append(fallback)
             except Exception as e:
                 logger.error("Stream failed: %s", e)
                 fallback = "\n\n[An error occurred while generating the response.]"
@@ -167,6 +196,9 @@ async def ask_stream(body: AskRequest, request: Request):
                 fallback = "Sorry, the model returned an empty response. Please try again or switch to a different model."
                 yield f"data: {json.dumps({'text': fallback})}\n\n"
                 response_text = fallback
+
+            if body.response_format == "flash_cards":
+                response_text = _fix_flash_card_format(response_text)
 
             try:
                 save_memory(user_id=user_id or session_id, query=body.query, response=response_text)
@@ -227,10 +259,54 @@ async def get_chart_data(ticker: str, period: str = "1y"):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     return data
 
+# ── Watchlist Endpoints ──
+
+@app.post("/watchlists")
+async def create_watchlist(body: WatchlistCreate, request: Request):
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    inserted_id = await MongoDB.create_watchlist(user_id, body.name, body.tickers)
+    return {"id": inserted_id}
+
+@app.get("/watchlists")
+async def list_watchlists(request: Request):
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    watchlists = await MongoDB.get_watchlists(user_id)
+    return {"watchlists": watchlists}
+
+@app.get("/watchlists/{watchlist_id}")
+async def get_watchlist(watchlist_id: str, request: Request):
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    watchlist = await MongoDB.get_watchlist(user_id, watchlist_id)
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    return watchlist
+
+@app.put("/watchlists/{watchlist_id}")
+async def update_watchlist(watchlist_id: str, body: WatchlistUpdate, request: Request):
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    success = await MongoDB.update_watchlist(user_id, watchlist_id, body.name, body.tickers)
+    if not success:
+        raise HTTPException(status_code=404, detail="Watchlist not found or unauthorized")
+    return {"success": True}
+
+@app.delete("/watchlists/{watchlist_id}")
+async def delete_watchlist(watchlist_id: str, request: Request):
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    success = await MongoDB.delete_watchlist(user_id, watchlist_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Watchlist not found or unauthorized")
+    return {"success": True}
+
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "agent-financials"}
+    from database.memory import get_memories
+    _, mem_error = get_memories(user_id="_health_check_", query="ping")
+    return {
+        "status": "ok",
+        "service": "agent-financials",
+        "mem0": "degraded" if mem_error else "ok",
+    }
 
 
 if __name__ == "__main__":

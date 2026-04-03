@@ -12,6 +12,7 @@ import logging
 import math
 
 import yfinance as yf
+from cachetools import cached, TTLCache
 
 logger = logging.getLogger("agent_financials.charts")
 
@@ -88,6 +89,7 @@ def _sma(closes: list[float], period: int) -> list[float | None]:
     return result
 
 
+@cached(cache=TTLCache(maxsize=100, ttl=900))
 def fetch_chart_data(ticker: str, period: str = "1y") -> dict:
     """
     Fetch OHLCV + technical indicators for `ticker` over `period`.

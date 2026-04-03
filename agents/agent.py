@@ -1,5 +1,9 @@
+import asyncio
 import logging
 import os
+import re
+import string
+import time
 from datetime import datetime, timezone
 
 from agent_sdk.agents import BaseAgent
@@ -44,6 +48,12 @@ SYSTEM_PROMPT = (
     "- **Calculated Stance:** Do not merely summarize. Weigh the evidence and provide a definitive 'Mentor's Take'.\n"
     "- **Math Fixes:** Use markdown tables and bold headers. Ensure math is clearly delimited.\n\n"
 
+    "### TOOL FAILURE PROTOCOL\n"
+    "- If a tool returns an error or empty data, **explicitly tell the user which data source failed** — never silently omit it.\n"
+    "- Suggest an alternative: e.g., 'I couldn't fetch the financial reports directly. Let me search for the latest results online.'\n"
+    "- Try a fallback: use `tavily_quick_search` as a fallback for any failed data-fetching tool.\n"
+    "- Clearly state which conclusions are weakened by missing data: 'Without the cash flow statement, my FCF estimate is unverified.'\n\n"
+
     "### CITATIONS\n"
     "Ground every factual claim in tool results with [n] inline markers.\n"
     "Append a 'Sources' header at the end listing titles and full URLs."
@@ -59,6 +69,29 @@ MCP_SERVERS = {
 
 _agent_instances: dict[str, BaseAgent] = {}
 _checkpointer: AsyncMongoDBSaver | None = None
+
+class LockCache:
+    def __init__(self, ttl: int = 3600):
+        self._locks = {}
+        self._timestamps = {}
+        self._ttl = ttl
+    
+    def get_lock(self, session_id: str) -> asyncio.Lock:
+        now = time.time()
+        expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
+        for sid in expired:
+            if sid in self._locks and not self._locks[sid].locked():
+                del self._locks[sid]
+                del self._timestamps[sid]
+        if session_id not in self._locks:
+            self._locks[session_id] = asyncio.Lock()
+        self._timestamps[session_id] = now
+        return self._locks[session_id]
+
+_session_locks = LockCache()
+
+def get_session_lock(session_id: str) -> asyncio.Lock:
+    return _session_locks.get_lock(session_id)
 
 
 def _get_checkpointer() -> AsyncMongoDBSaver:
@@ -113,19 +146,49 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
 }
 
 
-_TRIVIAL_FOLLOWUPS: frozenset[str] = frozenset({
-    "yes", "no", "sure", "ok", "okay", "please", "yes please",
-    "no thanks", "proceed", "go ahead", "continue", "yeah", "yep",
-})
+def _fix_flash_card_format(text: str) -> str:
+    """Post-process flash card responses to enforce consistent ### heading format.
+
+    LLMs occasionally use ## or #### instead of ### for card headings despite
+    explicit instructions. This fixes it and strips any preamble before the first card.
+    """
+    # Normalize ## headers to ### (but not #### → only fix exact ## prefix)
+    text = re.sub(r'^## (?!#)', '### ', text, flags=re.MULTILINE)
+    # Normalize #### headers to ### (too deep)
+    text = re.sub(r'^#### ', '### ', text, flags=re.MULTILINE)
+
+    # Strip any preamble text before the first ### card heading
+    first_card = re.search(r'^### ', text, re.MULTILINE)
+    if first_card:
+        text = text[first_card.start():]
+
+    # Warn if fewer than 5 cards (don't modify, just log)
+    card_count = len(re.findall(r'^### ', text, re.MULTILINE))
+    if card_count < 5:
+        logger.warning("Flash card response has only %d cards (expected 8-12)", card_count)
+
+    return text
 
 
-def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
-                            user_id: str | None = None) -> str:
+_TRIVIAL_FOLLOWUP_PATTERN = re.compile(
+    r'^(yes|no|sure|ok|okay|please|proceed|go\s*ahead|continue|yeah|yep|thanks|thank\s*you|got\s*it|tell\s*me\s*more|no\s*thanks)$',
+    re.IGNORECASE
+)
+
+def _is_trivial_followup(query: str) -> bool:
+    normalized = query.lower().translate(str.maketrans("", "", string.punctuation)).strip()
+    return bool(_TRIVIAL_FOLLOWUP_PATTERN.match(normalized))
+
+
+async def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
+                                user_id: str | None = None, as_of_date: str | None = None,
+                                watchlist_id: str | None = None) -> str:
     """Build dynamic context block (date, memories, format instructions) to prepend to the user query."""
     mem_key = user_id or session_id  # prefer stable user_id for Mem0
-    # Skip Mem0 search for trivial follow-ups — "Yes" has no semantic content to match against.
-    if query.strip().lower() not in _TRIVIAL_FOLLOWUPS and len(query.strip()) > 10:
-        memories = get_memories(user_id=mem_key, query=query)
+    # Skip Mem0 search for trivial follow-ups
+    mem_error: str | None = None
+    if not _is_trivial_followup(query) and len(query.strip()) > 10:
+        memories, mem_error = get_memories(user_id=mem_key, query=query)
     else:
         memories = []
 
@@ -133,15 +196,37 @@ def _build_dynamic_context(session_id: str, query: str, response_format: str | N
     year = today[:4]
 
     parts = []
-    parts.append(
-        f"Today's date: {today}. When using tavily_quick_search include the current year "
-        f"({year}) in search queries (e.g. 'HDFC Bank Q4 {year} results')."
-    )
+    
+    # Point-in-time context injection (PR 13)
+    if as_of_date:
+        parts.append(
+            f"IMPORTANT: The user is requesting a historical analysis as of {as_of_date}. "
+            f"While yfinance provides current data, please interpret all reported metrics "
+            f"within the context of that specific date. Acknowledge that fundamental data "
+            f"may be the most recent available rather than a true point-in-time snapshot."
+        )
+    else:
+        parts.append(
+            f"Today's date: {today}. When using tavily_quick_search include the current year "
+            f"({year}) in search queries (e.g. 'HDFC Bank Q4 {year} results')."
+        )
+
+    # Watchlist context injection (PR 13)
+    if watchlist_id and user_id:
+        watchlist = await MongoDB.get_watchlist(user_id, watchlist_id)
+        if watchlist:
+            tickers = ", ".join(watchlist.get("tickers", []))
+            parts.append(f"User's active watchlist ('{watchlist.get('name')}'): {tickers}")
+            logger.info("Injected watchlist '%s' into context", watchlist_id)
 
     if memories:
         memory_lines = "\n".join(f"- {m}" for m in memories)
         parts.append(f"User context (long-term memory):\n{memory_lines}")
         logger.info("Injected %d memories into context for session='%s'", len(memories), session_id)
+
+    if mem_error:
+        parts.append(f"Note: {mem_error}")
+        logger.warning("Mem0 degradation for session='%s': %s", session_id, mem_error)
 
     format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
     if format_instruction:
@@ -154,30 +239,42 @@ def _build_dynamic_context(session_id: str, query: str, response_format: str | N
 
 async def run_query(query: str, session_id: str = "default",
                     response_format: str | None = None, model_id: str | None = None,
-                    mode: str = "financial_analyst", user_id: str | None = None) -> dict:
-    logger.info("run_query called — session='%s', user='%s', query='%s', model='%s', mode='%s'",
-                session_id, user_id or "anonymous", query[:100], model_id or "default", mode)
+                    mode: str = "financial_analyst", user_id: str | None = None,
+                    as_of_date: str | None = None, watchlist_id: str | None = None) -> dict:
+    logger.info("run_query called — session='%s', user='%s', query='%s', model='%s', mode='%s', as_of=%s, watchlist=%s",
+                session_id, user_id or "anonymous", query[:100], model_id or "default", mode, as_of_date, watchlist_id)
 
-    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
+    dynamic_context = await _build_dynamic_context(
+        session_id, query, response_format=response_format, user_id=user_id,
+        as_of_date=as_of_date, watchlist_id=watchlist_id
+    )
     enriched_query = dynamic_context + query
 
     agent = get_agent(mode)
-    result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
+    async with get_session_lock(session_id):
+        result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
+
+    if response_format == "flash_cards":
+        result["response"] = _fix_flash_card_format(result["response"])
 
     save_memory(user_id=user_id or session_id, query=query, response=result["response"])
 
     return result
 
 
-def create_stream(query: str, session_id: str = "default",
-                  response_format: str | None = None, model_id: str | None = None,
-                  mode: str = "financial_analyst", user_id: str | None = None):
+async def create_stream(query: str, session_id: str = "default",
+                   response_format: str | None = None, model_id: str | None = None,
+                   mode: str = "financial_analyst", user_id: str | None = None,
+                   as_of_date: str | None = None, watchlist_id: str | None = None):
     """Create a StreamResult for the query. Returns the stream object directly."""
-    logger.info("create_stream called — session='%s', user='%s', query='%s', model='%s', mode='%s'",
-                session_id, user_id or "anonymous", query[:100], model_id or "default", mode)
+    logger.info("create_stream called — session='%s', user='%s', query='%s', model='%s', mode='%s', as_of=%s, watchlist=%s",
+                session_id, user_id or "anonymous", query[:100], model_id or "default", mode, as_of_date, watchlist_id)
 
-    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
+    dynamic_context = await _build_dynamic_context(
+        session_id, query, response_format=response_format, user_id=user_id,
+        as_of_date=as_of_date, watchlist_id=watchlist_id
+    )
     enriched_query = dynamic_context + query
     agent = get_agent(mode)
     return agent.astream(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)

@@ -23,10 +23,11 @@ def _get_client() -> MemoryClient:
 _MEMORY_SCORE_THRESHOLD = 0.70  # only inject memories with at least 70% semantic relevance
 
 
-def get_memories(user_id: str, query: str) -> list[str]:
+def get_memories(user_id: str, query: str) -> tuple[list[str], str | None]:
     """
     Search Mem0 for facts relevant to the user and the current query.
-    Returns a list of plain-text memory strings to be injected into the system prompt.
+    Returns (memories, error_msg) — error_msg is None on success, a user-friendly
+    string on failure so the caller can surface degradation to the user.
     """
     try:
         client = _get_client()
@@ -45,11 +46,11 @@ def get_memories(user_id: str, query: str) -> list[str]:
             logger.info("Retrieved %d memories for user='%s'", len(memories), user_id)
         else:
             logger.info("No relevant memories found for user='%s'", user_id)
-        return memories
+        return memories, None
     except Exception as e:
         # Memory retrieval failures should never break the agent — degrade gracefully
         logger.warning("Failed to retrieve memories for user='%s': %s", user_id, e)
-        return []
+        return [], "Personalization temporarily unavailable — memory service unreachable."
 
 
 def save_memory(user_id: str, query: str, response: str) -> None:
