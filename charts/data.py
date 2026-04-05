@@ -20,6 +20,27 @@ logger = logging.getLogger("agent_financials.charts")
 VALID_PERIODS = {"1mo", "3mo", "6mo", "1y", "2y", "5y"}
 VALID_INTERVALS = {"1d", "1wk"}
 
+# Common Indian company abbreviations → correct NSE ticker (with .NS suffix)
+_COMMON_NSE_ALIASES: dict[str, str] = {
+    "sbi": "SBIN.NS", "ubi": "UNIONBANK.NS", "bob": "BANKBARODA.NS",
+    "boi": "BANKINDIA.NS", "pnb": "PNB.NS", "canara": "CANBK.NS",
+    "uco": "UCOBANK.NS", "iob": "IOB.NS", "centralbk": "CENTRALBK.NS",
+    "indianb": "INDIANB.NS", "hdfcbank": "HDFCBANK.NS", "icicibank": "ICICIBANK.NS",
+    "axisbank": "AXISBANK.NS", "kotakbank": "KOTAKBANK.NS",
+}
+
+
+def _resolve_ticker(raw: str) -> str:
+    """Normalise a user-supplied ticker to a yfinance-compatible NSE symbol.
+    Handles missing .NS suffix and common PSU bank abbreviations like SBI → SBIN.NS."""
+    stripped = raw.strip()
+    lower = stripped.lower()
+    if lower.endswith(".ns") or lower.endswith(".bo"):
+        return stripped
+    if lower in _COMMON_NSE_ALIASES:
+        return _COMMON_NSE_ALIASES[lower]
+    return f"{stripped}.NS"
+
 
 def _ema_series(values: list[float], period: int) -> list[float | None]:
     """Exponential moving average. Returns None for the first `period-1` positions."""
@@ -243,6 +264,7 @@ def fetch_chart_data(ticker: str, period: str = "1y") -> dict:
     Returns a serializable dict ready for JSON response.
     Raises ValueError for invalid inputs, RuntimeError if yfinance fails.
     """
+    ticker = _resolve_ticker(ticker)
     period = period if period in VALID_PERIODS else "1y"
 
     logger.info("Building chart data for ticker='%s', period='%s'", ticker, period)
