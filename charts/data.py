@@ -89,6 +89,153 @@ def _sma(closes: list[float], period: int) -> list[float | None]:
     return result
 
 
+def _compute_signals(
+    closes: list[float],
+    rsi_14: list[float | None],
+    macd_line: list[float | None],
+    macd_signal: list[float | None],
+    bb_upper: list[float | None],
+    bb_lower: list[float | None],
+    sma_200: list[float | None],
+    ann_vol: float | None,
+) -> dict:
+    """
+    Derive plain-English signals from the latest indicator values.
+    Returns a dict keyed by chart area ('price', 'rsi', 'macd'), each a list of
+    {text: str, sentiment: 'bullish'|'bearish'|'neutral'} dicts.
+    """
+    def last(series):
+        for v in reversed(series):
+            if v is not None:
+                return v
+        return None
+
+    price  = last(closes)
+    rsi    = last(rsi_14)
+    macd   = last(macd_line)
+    sig    = last(macd_signal)
+    bbu    = last(bb_upper)
+    bbl    = last(bb_lower)
+    sma200 = last(sma_200)
+
+    price_signals: list[dict] = []
+    rsi_signals:   list[dict] = []
+    macd_signals:  list[dict] = []
+
+    # --- Price: trend vs SMA200 ---
+    if price is not None and sma200 is not None:
+        if price > sma200:
+            price_signals.append({
+                "text": "Above long-term average — stock is in an uptrend over this period",
+                "sentiment": "bullish",
+            })
+        else:
+            price_signals.append({
+                "text": "Below long-term average — stock is in a downtrend over this period",
+                "sentiment": "bearish",
+            })
+
+    # --- Price: Bollinger Band position ---
+    if price is not None and bbu is not None and bbl is not None:
+        rng = bbu - bbl
+        if rng > 0:
+            pct = (price - bbl) / rng
+            if pct >= 0.85:
+                price_signals.append({
+                    "text": "Near upper Bollinger Band — trading at the high end of its recent range",
+                    "sentiment": "bearish",
+                })
+            elif pct <= 0.15:
+                price_signals.append({
+                    "text": "Near lower Bollinger Band — trading at the low end of its recent range",
+                    "sentiment": "bullish",
+                })
+            else:
+                price_signals.append({
+                    "text": "Within Bollinger Bands — price is moving in a normal range",
+                    "sentiment": "neutral",
+                })
+
+    # --- Price: annualised volatility ---
+    if ann_vol is not None:
+        if ann_vol > 40:
+            price_signals.append({
+                "text": f"High volatility ({ann_vol:.0f}% annually) — price swings are large; higher risk",
+                "sentiment": "bearish",
+            })
+        elif ann_vol > 20:
+            price_signals.append({
+                "text": f"Moderate volatility ({ann_vol:.0f}% annually) — normal price movement",
+                "sentiment": "neutral",
+            })
+        else:
+            price_signals.append({
+                "text": f"Low volatility ({ann_vol:.0f}% annually) — price is relatively stable",
+                "sentiment": "bullish",
+            })
+
+    # --- RSI ---
+    if rsi is not None:
+        if rsi >= 70:
+            rsi_signals.append({
+                "text": f"Overbought (RSI {rsi:.0f}) — the stock has risen sharply; a pullback is possible",
+                "sentiment": "bearish",
+            })
+        elif rsi <= 30:
+            rsi_signals.append({
+                "text": f"Oversold (RSI {rsi:.0f}) — the stock has fallen sharply; a bounce is possible",
+                "sentiment": "bullish",
+            })
+        elif rsi >= 55:
+            rsi_signals.append({
+                "text": f"Momentum leaning bullish (RSI {rsi:.0f}) — buyers are in control",
+                "sentiment": "bullish",
+            })
+        elif rsi <= 45:
+            rsi_signals.append({
+                "text": f"Momentum leaning bearish (RSI {rsi:.0f}) — sellers are in control",
+                "sentiment": "bearish",
+            })
+        else:
+            rsi_signals.append({
+                "text": f"Neutral momentum (RSI {rsi:.0f}) — no strong buying or selling pressure",
+                "sentiment": "neutral",
+            })
+
+    # --- MACD: line vs signal line ---
+    if macd is not None and sig is not None:
+        if macd > sig:
+            macd_signals.append({
+                "text": "Bullish momentum — MACD line is above the signal line; buying pressure is building",
+                "sentiment": "bullish",
+            })
+        elif macd < sig:
+            macd_signals.append({
+                "text": "Bearish momentum — MACD line is below the signal line; selling pressure is building",
+                "sentiment": "bearish",
+            })
+        else:
+            macd_signals.append({
+                "text": "MACD at crossover — momentum is shifting; watch for a breakout",
+                "sentiment": "neutral",
+            })
+
+    # --- MACD: sign of the MACD line ---
+    if macd is not None:
+        if macd > 0:
+            macd_signals.append({
+                "text": "MACD is positive — short-term average is above the long-term average",
+                "sentiment": "bullish",
+            })
+        elif macd < 0:
+            macd_signals.append({
+                "text": "MACD is negative — short-term average is below the long-term average",
+                "sentiment": "bearish",
+            })
+
+    return {"price": price_signals, "rsi": rsi_signals, "macd": macd_signals}
+
+
 @cached(cache=TTLCache(maxsize=100, ttl=900))
 def fetch_chart_data(ticker: str, period: str = "1y") -> dict:
     """
@@ -160,6 +307,17 @@ def fetch_chart_data(ticker: str, period: str = "1y") -> dict:
     avg_vol_10d = int(sum(volumes[-10:]) / min(10, len(volumes))) if volumes else None
     avg_vol_30d = int(sum(volumes[-30:]) / min(30, len(volumes))) if volumes else None
 
+    signals = _compute_signals(
+        closes=closes,
+        rsi_14=rsi_14,
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        bb_upper=bb_upper,
+        bb_lower=bb_lower,
+        sma_200=sma_200,
+        ann_vol=ann_vol,
+    )
+
     # Fetch company name
     try:
         info = t.fast_info
@@ -197,4 +355,5 @@ def fetch_chart_data(ticker: str, period: str = "1y") -> dict:
             "avg_volume_10d": avg_vol_10d,
             "avg_volume_30d": avg_vol_30d,
         },
+        "signals": signals,
     }
