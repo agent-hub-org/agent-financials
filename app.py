@@ -38,6 +38,8 @@ limiter = Limiter(key_func=get_remote_address_or_user)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not os.getenv("INTERNAL_API_KEY"):
+        logger.warning("INTERNAL_API_KEY is not set — internal API is unprotected. Set this in production.")
     # Connect MCP servers on startup for both modes
     for mode in ("standard", "financial_analyst"):
         agent = get_agent(mode)
@@ -91,6 +93,15 @@ async def verify_internal_key(request: Request, call_next):
         if expected and request.headers.get("X-Internal-API-Key") != expected:
             return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Unauthorized internal access"})
     return await call_next(request)
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 # Mount the A2A server as a sub-application
 a2a_app = create_a2a_app()
@@ -262,11 +273,11 @@ async def ask_stream(body: AskRequest, request: Request):
 
 
 @app.get("/history/user/me", response_model=HistoryResponse)
+@limiter.limit("60/minute")
 async def get_history_by_user(http_request: Request):
     user_id = http_request.headers.get("X-User-Id") or None
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    """Get all conversation history for the authenticated user (across all sessions)."""
     logger.info("GET /history/user/me — user='%s'", user_id)
     history = await MongoDB.get_history_by_user(user_id)
     logger.info("Returning %d history entries for user='%s'", len(history), user_id)
@@ -274,11 +285,25 @@ async def get_history_by_user(http_request: Request):
 
 
 @app.get("/history/{session_id}", response_model=HistoryResponse)
-async def get_history(session_id: str):
+@limiter.limit("60/minute")
+async def get_history(request: Request, session_id: str):
     logger.info("GET /history — session='%s'", session_id)
     history = await MongoDB.get_history(session_id)
     logger.info("Returning %d history entries for session='%s'", len(history), session_id)
     return HistoryResponse(session_id=session_id, history=history)
+
+
+class SessionsHistoryRequest(BaseModel):
+    session_ids: list[str]
+
+
+@app.post("/history/sessions")
+@limiter.limit("30/minute")
+async def get_history_by_sessions(request: Request, body: SessionsHistoryRequest):
+    safe_ids = [s for s in body.session_ids[:20] if isinstance(s, str) and s.isalnum() and len(s) <= 64]
+    logger.info("POST /history/sessions — %d session(s)", len(safe_ids))
+    history = await MongoDB.get_history_by_sessions(safe_ids)
+    return {"history": history}
 
 
 @app.get("/charts/{ticker}")
@@ -302,21 +327,27 @@ async def get_chart_data(ticker: str, period: str = "1y"):
 
 # ── Watchlist Endpoints ──
 
+def _require_user_id(request: Request) -> str:
+    user_id = request.headers.get("X-User-Id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user_id
+
 @app.post("/watchlists")
 async def create_watchlist(body: WatchlistCreate, request: Request):
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    user_id = _require_user_id(request)
     inserted_id = await MongoDB.create_watchlist(user_id, body.name, body.tickers)
     return {"id": inserted_id}
 
 @app.get("/watchlists")
 async def list_watchlists(request: Request):
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    user_id = _require_user_id(request)
     watchlists = await MongoDB.get_watchlists(user_id)
     return {"watchlists": watchlists}
 
 @app.get("/watchlists/{watchlist_id}")
 async def get_watchlist(watchlist_id: str, request: Request):
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    user_id = _require_user_id(request)
     watchlist = await MongoDB.get_watchlist(user_id, watchlist_id)
     if not watchlist:
         raise HTTPException(status_code=404, detail="Watchlist not found")
@@ -324,7 +355,7 @@ async def get_watchlist(watchlist_id: str, request: Request):
 
 @app.put("/watchlists/{watchlist_id}")
 async def update_watchlist(watchlist_id: str, body: WatchlistUpdate, request: Request):
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    user_id = _require_user_id(request)
     success = await MongoDB.update_watchlist(user_id, watchlist_id, body.name, body.tickers)
     if not success:
         raise HTTPException(status_code=404, detail="Watchlist not found or unauthorized")
@@ -332,7 +363,7 @@ async def update_watchlist(watchlist_id: str, body: WatchlistUpdate, request: Re
 
 @app.delete("/watchlists/{watchlist_id}")
 async def delete_watchlist(watchlist_id: str, request: Request):
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    user_id = _require_user_id(request)
     success = await MongoDB.delete_watchlist(user_id, watchlist_id)
     if not success:
         raise HTTPException(status_code=404, detail="Watchlist not found or unauthorized")
