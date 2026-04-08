@@ -277,6 +277,12 @@ def fetch_chart_data(ticker: str, period: str = "1y") -> dict:
     if hist.empty:
         raise ValueError(f"No price data found for ticker '{ticker}'.")
 
+    # Sanitize: drop rows with NaN OHLC; fill NaN volume with 0
+    hist = hist.dropna(subset=["Open", "High", "Low", "Close"])
+    if hist.empty:
+        raise ValueError(f"No usable price data found for ticker '{ticker}' (all rows contained NaN).")
+    hist["Volume"] = hist["Volume"].fillna(0)
+
     # Normalize timezone-aware DatetimeIndex to date strings
     hist.index = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
     dates = hist.index.strftime("%Y-%m-%d").tolist()
