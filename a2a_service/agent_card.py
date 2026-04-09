@@ -12,6 +12,7 @@ FINANCIAL_AGENT_CARD = AgentCard(
     ),
     url=os.getenv("AGENT_PUBLIC_URL", "http://localhost:9001"),
     version="1.0.0",
+    metadata={"mode": "financial_analyst"},
     skills=[
         AgentSkill(
             id="stock-analysis",

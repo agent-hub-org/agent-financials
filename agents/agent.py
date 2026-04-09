@@ -244,19 +244,7 @@ async def run_query(query: str, session_id: str = "default",
         )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
-    # Sanitize potential JSON-wrapped outputs like {"full_report": "..."}
-    try:
-        if isinstance(result.get("response"), str):
-            maybe_json = json.loads(result["response"])  # type: ignore[arg-type]
-            if isinstance(maybe_json, dict) and "full_report" in maybe_json:
-                result["response"] = maybe_json.get("full_report") or result["response"]
-                # Preserve the structured synthesis if not already present
-                if "synthesis_report" not in result:
-                    result["synthesis_report"] = maybe_json
-    except Exception:
-        # Not JSON — leave as-is
-        pass
-
+    # The SDK now handles JSON-wrapped outputs automatically via unwrap_structured_response
     if response_format == "flash_cards":
         result["response"] = _fix_flash_card_format(result["response"])
 
