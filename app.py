@@ -308,6 +308,7 @@ async def ask_stream(body: AskRequest, request: Request):
                     response=response_text,
                     steps=stream.steps,
                     user_id=user_id,
+                    plan=stream.plan,
                 )
             except Exception as e:
                 logger.error("Failed to save memory/conversation: %s", e)

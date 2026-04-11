@@ -485,6 +485,7 @@ async def run_query(query: str, session_id: str = "default",
         response=result["response"],
         steps=result["steps"],
         user_id=user_id,
+        plan=result.get("plan"),
     )
 
     return result
@@ -511,3 +512,59 @@ async def create_stream(query: str, session_id: str = "default",
         system_prompt=_build_system_prompt(profile, mode=mode),
         model_id=model_id, as_of_date=as_of_date,
     )
+
+
+async def stream_for_a2a(query: str, *, session_id: str = "default",
+                         user_id: str | None = None,
+                         response_format: str | None = None, model_id: str | None = None,
+                         mode: str = "financial_analyst",
+                         as_of_date: str | None = None, watchlist_id: str | None = None):
+    """
+    Async generator used by the A2A StreamingAgentExecutor.
+
+    Streams text chunks (including __PROGRESS__ markers) and saves the
+    completed conversation to MongoDB after the stream finishes.
+    """
+    logger.info(
+        "stream_for_a2a called — session='%s', user='%s', query='%s', mode='%s'",
+        session_id, user_id or "anonymous", query[:100], mode,
+    )
+    profile: dict | None = await MongoDB.get_profile(user_id) if user_id else None
+
+    dynamic_context, _ = await _build_dynamic_context(
+        session_id, query, response_format=response_format, user_id=user_id,
+        as_of_date=as_of_date, watchlist_id=watchlist_id, profile=profile,
+    )
+    enriched_query = dynamic_context + query
+    agent = get_agent(mode)
+    stream = agent.astream(
+        enriched_query, session_id=session_id,
+        system_prompt=_build_system_prompt(profile, mode=mode),
+        model_id=model_id, as_of_date=as_of_date,
+    )
+
+    response_parts: list[str] = []
+    async for chunk in stream:
+        yield chunk
+        # Collect only actual response text (not progress/error markers)
+        if not chunk.startswith("__PROGRESS__:") and not chunk.startswith("__ERROR__:"):
+            response_parts.append(chunk)
+
+    response_text = "".join(response_parts)
+    logger.info(
+        "stream_for_a2a finished — session='%s', steps: %d, response: %d chars",
+        session_id, len(stream.steps), len(response_text),
+    )
+
+    save_memory(user_id=user_id or session_id, query=query, response=response_text)
+    try:
+        await MongoDB.save_conversation(
+            session_id=session_id,
+            query=query,
+            response=response_text,
+            steps=stream.steps,
+            user_id=user_id,
+            plan=stream.plan,
+        )
+    except Exception as e:
+        logger.error("stream_for_a2a: failed to save conversation: %s", e)
