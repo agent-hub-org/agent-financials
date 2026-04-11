@@ -68,6 +68,65 @@ SYSTEM_PROMPT = (
     "Append a 'Sources' header at the end listing titles and full URLs."
 )
 
+# Phase-specific guidance injected into the system prompt for financial_analyst mode.
+# financial_phase_executor tells the LLM which phase it is currently executing via a
+# "=== CURRENT PHASE: X ===" header; the LLM uses this guidance to know what to do.
+FINANCIAL_PIPELINE_GUIDANCE = """
+
+### FINANCIAL REASONING PIPELINE — PHASE GUIDE
+
+You operate a multi-phase reasoning pipeline. Each phase has a specific focus.
+Follow the EXECUTION PLAN in your context and stop calling tools once the plan
+section for the current phase is satisfied. Never re-fetch data already in
+PRIOR PHASE RESULTS.
+
+#### REGIME ASSESSMENT
+Goal: Establish the macro/market regime so subsequent phases can calibrate their analysis.
+Tools to use: detect_market_regime, get_macro_indicators, get_fii_dii_flows, tavily_quick_search.
+Output: A labeled prose summary covering — market regime label, India VIX level, interest rate
+environment, FII/DII flows, and the macro backdrop's net impact on equities.
+
+#### CAUSAL ANALYSIS
+Goal: Trace causal chains from the trigger event or macro change to market sectors and instruments.
+Tools to use: traverse_causal_chain, get_affected_entities, get_transmission_path,
+run_scenario_simulation, tavily_quick_search.
+Output: The transmission path (trigger → mechanism → first-order effects → second-order effects),
+which sectors/instruments benefit/suffer, and magnitude/timeline estimates.
+
+#### SECTOR ANALYSIS
+Goal: Assess the positioning, valuation norms, and FII/DII activity in the relevant sector(s).
+Tools to use: get_sector_norms, interpret_metric, get_fii_dii_flows, tavily_quick_search.
+Output: Sector valuation vs. historical norms, flow trends, key catalysts and headwinds,
+and a sector stance (overweight / neutral / underweight).
+
+#### COMPANY ANALYSIS
+Goal: Deep fundamental analysis of the specific company or companies.
+Tools to use: get_ticker_data, get_bse_nse_reports, get_historical_ohlcv, run_dcf,
+run_comparable_valuation, calculate_risk_metrics, interpret_metric,
+firecrawl_deep_scrape, tavily_quick_search.
+Output: Revenue/profit trends, key ratios (P/E, ROE, D/E, ROCE) vs. sector norms,
+valuation verdict (fair / overvalued / undervalued), growth catalysts, management quality signals,
+and a clear recommendation with conviction level and time horizon.
+
+#### RISK ASSESSMENT
+Goal: Stress-test the investment thesis and quantify downside scenarios.
+Tools to use: calculate_risk_metrics, run_scenario_simulation, get_historical_ohlcv,
+traverse_causal_chain (for macro risk propagation), tavily_quick_search.
+Output: Key risks ranked by probability × impact, tail-risk scenarios, stop-loss
+or position-sizing guidance, and factors that would invalidate the thesis.
+
+#### COMPARATIVE ANALYSIS
+Goal: Side-by-side comparison of two or more entities on fundamentals, valuation, and growth.
+Use the same tools as COMPANY ANALYSIS for each entity. Run analyses in parallel.
+Output: A structured comparison table followed by a clear relative preference with reasoning.
+
+#### SYNTHESIS
+Goal: Combine all prior phase results into a coherent, user-facing investment report.
+No tools — pure reasoning. Read from PRIOR PHASE RESULTS.
+Follow the SYNTHESIS_PROMPT format: executive summary, deep-dive, catalysts, risks,
+mentor's verdict. Always define jargon. Always include a disclaimer.
+"""
+
 # MCP server configuration — all tools served from a single combined MCP server
 MCP_SERVERS = {
     "mcp-tool-servers": {
@@ -251,10 +310,12 @@ async def _fetch_news_context(query: str, session_id: str) -> str | None:
     return None
 
 
-def _build_system_prompt(profile: dict | None) -> str:
+def _build_system_prompt(profile: dict | None, mode: str = "financial_analyst") -> str:
     """Compose the final system prompt, adapting to investor knowledge level."""
     kl = (profile or {}).get("knowledge_level", "expert")
     prompt = SYSTEM_PROMPT
+    if mode == "financial_analyst":
+        prompt += FINANCIAL_PIPELINE_GUIDANCE
 
     prompt += (
         "\n\n### LEARNING PATH & CONTINUITY\n"
@@ -397,7 +458,7 @@ async def run_query(query: str, session_id: str = "default",
     async with get_session_lock(session_id):
         result = await agent.arun(
             enriched_query, session_id=session_id,
-            system_prompt=_build_system_prompt(profile),
+            system_prompt=_build_system_prompt(profile, mode=mode),
             model_id=model_id, as_of_date=as_of_date,
         )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
@@ -425,6 +486,6 @@ async def create_stream(query: str, session_id: str = "default",
     agent = get_agent(mode)
     return agent.astream(
         enriched_query, session_id=session_id,
-        system_prompt=_build_system_prompt(profile),
+        system_prompt=_build_system_prompt(profile, mode=mode),
         model_id=model_id, as_of_date=as_of_date,
     )
