@@ -82,7 +82,11 @@ PRIOR PHASE RESULTS.
 
 #### REGIME ASSESSMENT
 Goal: Establish the macro/market regime so subsequent phases can calibrate their analysis.
-Tools to use: detect_market_regime, get_macro_indicators, get_fii_dii_flows, tavily_quick_search.
+Tools to use: get_regime_inputs (call first — returns structured JSON for detect_market_regime),
+detect_market_regime, get_fii_dii_flows, tavily_quick_search.
+Data rule: call get_regime_inputs() to get live india_vix/usd_inr/crude_brent/fii_net_30d/nifty_pe;
+use tavily_quick_search for the fields listed in get_regime_inputs.needs_search
+(repo_rate, cpi_yoy, credit_growth, gsec_10y). Pass all values to detect_market_regime.
 Output: A labeled prose summary covering — market regime label, India VIX level, interest rate
 environment, FII/DII flows, and the macro backdrop's net impact on equities.
 
@@ -101,17 +105,27 @@ and a sector stance (overweight / neutral / underweight).
 
 #### COMPANY ANALYSIS
 Goal: Deep fundamental analysis of the specific company or companies.
-Tools to use: get_ticker_data, get_bse_nse_reports, get_historical_ohlcv, run_dcf,
-run_comparable_valuation, calculate_risk_metrics, interpret_metric,
-firecrawl_deep_scrape, tavily_quick_search.
+Tools to use: get_ticker_data, get_bse_nse_reports, get_historical_ohlcv (trend summary only),
+get_price_series, get_dcf_inputs, get_comparable_metrics,
+run_dcf, run_comparable_valuation, calculate_technical_signals, calculate_risk_metrics,
+interpret_metric, firecrawl_deep_scrape, tavily_quick_search.
+Data rules (MANDATORY — never pass hardcoded or invented values):
+- Prices for calculate_technical_signals / calculate_risk_metrics: call get_price_series(ticker)
+  and pass the returned closes list directly. Do NOT extract prices from get_historical_ohlcv markdown.
+- DCF inputs: call get_dcf_inputs(ticker) first; pass its fields to run_dcf directly.
+  Adjust growth_rate_pct only based on actual forward guidance or analyst estimates from tavily.
+- Comparable valuation: call get_comparable_metrics([target] + peers) and pass its
+  target_ticker, target_metrics, peers directly to run_comparable_valuation.
 Output: Revenue/profit trends, key ratios (P/E, ROE, D/E, ROCE) vs. sector norms,
 valuation verdict (fair / overvalued / undervalued), growth catalysts, management quality signals,
 and a clear recommendation with conviction level and time horizon.
 
 #### RISK ASSESSMENT
 Goal: Stress-test the investment thesis and quantify downside scenarios.
-Tools to use: calculate_risk_metrics, run_scenario_simulation, get_historical_ohlcv,
-traverse_causal_chain (for macro risk propagation), tavily_quick_search.
+Tools to use: get_price_series, calculate_risk_metrics, calculate_technical_signals,
+run_scenario_simulation, get_historical_ohlcv, traverse_causal_chain, tavily_quick_search.
+Data rule: call get_price_series(ticker) and pass closes to calculate_risk_metrics and
+calculate_technical_signals. Never extract price lists manually from markdown.
 Output: Key risks ranked by probability × impact, tail-risk scenarios, stop-loss
 or position-sizing guidance, and factors that would invalidate the thesis.
 
@@ -464,6 +478,14 @@ async def run_query(query: str, session_id: str = "default",
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     save_memory(user_id=user_id or session_id, query=query, response=result["response"])
+
+    await MongoDB.save_conversation(
+        session_id=session_id,
+        query=query,
+        response=result["response"],
+        steps=result["steps"],
+        user_id=user_id,
+    )
 
     return result
 

@@ -213,14 +213,6 @@ async def ask(body: AskRequest, request: Request):
     response = result["response"]
     steps = result["steps"]
 
-    await MongoDB.save_conversation(
-        session_id=session_id,
-        query=body.query,
-        response=response,
-        steps=steps,
-        user_id=user_id,
-    )
-
     logger.info("POST /ask complete — session='%s', response length: %d chars, tool_calls: %d",
                 session_id, len(response),
                 sum(1 for s in steps if s.get("action") == "tool_call"))
