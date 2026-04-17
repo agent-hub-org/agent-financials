@@ -19,7 +19,7 @@ from slowapi.util import get_remote_address
 from agent_sdk.logging import configure_logging
 from agent_sdk.context import request_id_var, user_id_var
 from agent_sdk.metrics import metrics_response
-from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, get_session_lock
+from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, get_session_lock, _news_client
 from agent_sdk.database.memory import _get_client as _get_mem0_client
 from database.mongo import MongoDB
 from database.profile import ONBOARDING_QUESTIONS, VALID_RISK_TOLERANCES, VALID_GOALS, VALID_KNOWLEDGE_LEVELS
@@ -52,6 +52,8 @@ async def lifespan(app: FastAPI):
     # Disconnect MCP on shutdown for all initialized agents
     for agent in list(_agent_instances.values()):
         await agent._disconnect_mcp()
+    if _news_client:
+        await _news_client.aclose()
     await MongoDB.close()
     logger.info("Shutdown complete")
 

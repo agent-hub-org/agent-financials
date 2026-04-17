@@ -165,9 +165,10 @@ _HIGH_RISK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _NEWS_QUERY_PATTERN = re.compile(
-    r'\b(news|market\s+today|what\s+happened|rbi|budget|policy|rate\s+cut|'
-    r'inflation|gdp|fii|dii|sensex\s+today|nifty\s+today|crash|rally|'
-    r'quarterly\s+results?|earnings?)\b',
+    r'\b(news|update|today|this\s+week|this\s+month|latest|recent|market|'
+    r'what\s+happened|what\s+is\s+happening|rbi|sebi|budget|policy|rate|'
+    r'inflation|gdp|fii|dii|sensex|nifty|crash|rally|earnings|results?|'
+    r'quarter(?:ly)?|q[1-4]\s*\d{2,4}|fy\d{2,4})\b',
     re.IGNORECASE,
 )
 
@@ -259,6 +260,18 @@ def get_session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks.get_lock(session_id)
 
 
+_news_client: httpx.AsyncClient | None = None
+
+def _get_news_client() -> httpx.AsyncClient:
+    global _news_client
+    if _news_client is None:
+        _news_client = httpx.AsyncClient(
+            timeout=10.0,
+            headers={"X-Internal-API-Key": _INTERNAL_API_KEY},
+        )
+    return _news_client
+
+
 def _get_checkpointer() -> AsyncMongoDBSaver:
     global _checkpointer
     if _checkpointer is None:
@@ -293,6 +306,8 @@ _TRIVIAL_FOLLOWUP_PATTERN = re.compile(
 
 def _is_trivial_followup(query: str) -> bool:
     normalized = query.lower().translate(str.maketrans("", "", string.punctuation)).strip()
+    if len(normalized.split()) > 4:
+        return False
     return bool(_TRIVIAL_FOLLOWUP_PATTERN.match(normalized))
 
 
@@ -307,21 +322,21 @@ def _is_news_query(query: str) -> bool:
 async def _fetch_news_context(query: str, session_id: str) -> str | None:
     """Call agent-news /ask and return a context string. Returns None on any failure."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{_NEWS_AGENT_URL}/ask",
-                json={
-                    "query": query,
-                    "session_id": f"fin-ctx-{session_id}",
-                    "response_format": "summary",
-                },
-                headers={"X-Internal-API-Key": _INTERNAL_API_KEY},
-            )
-            resp.raise_for_status()
-            news = resp.json().get("response", "").strip()
-            if news:
-                logger.info("Fetched news context (%d chars) for session='%s'", len(news), session_id)
-                return f"LIVE NEWS CONTEXT (from agent-news):\n{news}"
+        client = _get_news_client()
+        resp = await client.post(
+            f"{_NEWS_AGENT_URL}/ask",
+            json={
+                "query": query,
+                "session_id": f"fin-ctx-{session_id}",
+                "response_format": "summary",
+            },
+            headers={"X-Internal-API-Key": _INTERNAL_API_KEY},
+        )
+        resp.raise_for_status()
+        news = resp.json().get("response", "").strip()
+        if news:
+            logger.info("Fetched news context (%d chars) for session='%s'", len(news), session_id)
+            return f"LIVE NEWS CONTEXT (from agent-news):\n{news}"
     except httpx.TimeoutException:
         logger.warning("News agent timed out for session='%s'", session_id)
     except Exception as e:
@@ -382,12 +397,11 @@ async def _build_dynamic_context(
     user_id: str | None = None,
     as_of_date: str | None = None,
     watchlist_id: str | None = None,
-    profile: dict | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict | None]:
     """Build [CONTEXT] block and resolve effective response format.
-    Returns (context_block_string, effective_format).
+    Returns (context_block_string, effective_format, profile).
 
-    Parallelizes Mem0 search, MongoDB watchlist fetch, and news context fetch
+    Parallelizes Mem0 search, MongoDB watchlist fetch, news context fetch, and profile fetch
     using asyncio.gather() — cuts pre-LLM overhead from ~2s to ~700ms.
     """
     mem_key = user_id or session_id
@@ -411,10 +425,16 @@ async def _build_dynamic_context(
             return None
         return await _fetch_news_context(query, session_id)
 
-    (memories, mem_error), watchlist, news_ctx = await asyncio.gather(
+    async def _get_profile():
+        if not user_id:
+            return None
+        return await MongoDB.get_profile(user_id)
+
+    (memories, mem_error), watchlist, news_ctx, profile = await asyncio.gather(
         _get_mem(),
         _get_watchlist(),
         _get_news(),
+        _get_profile(),
     )
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -475,7 +495,7 @@ async def _build_dynamic_context(
         logger.info("Applied response format '%s' for session='%s'", effective_format, session_id)
 
     context_block = "[CONTEXT]\n" + "\n\n".join(parts) + "\n[/CONTEXT]\n\n"
-    return context_block, effective_format
+    return context_block, effective_format, profile
 
 
 async def run_query(query: str, session_id: str = "default",
@@ -485,12 +505,9 @@ async def run_query(query: str, session_id: str = "default",
     logger.info("run_query called — session='%s', user='%s', query='%s', model='%s', mode='%s', as_of=%s, watchlist=%s",
                 session_id, user_id or "anonymous", query[:100], model_id or "default", mode, as_of_date, watchlist_id)
 
-    # Fetch profile first (needed by _build_dynamic_context) — then build context
-    profile: dict | None = await MongoDB.get_profile(user_id) if user_id else None
-
-    dynamic_context, _ = await _build_dynamic_context(
+    dynamic_context, _, profile = await _build_dynamic_context(
         session_id, query, response_format=response_format, user_id=user_id,
-        as_of_date=as_of_date, watchlist_id=watchlist_id, profile=profile,
+        as_of_date=as_of_date, watchlist_id=watchlist_id,
     )
     enriched_query = dynamic_context + query
 
@@ -503,7 +520,9 @@ async def run_query(query: str, session_id: str = "default",
         )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
-    save_memory(user_id=user_id or session_id, query=query, response=result["response"])
+    asyncio.get_event_loop().create_task(
+        asyncio.to_thread(save_memory, user_id=user_id or session_id, query=query, response=result["response"])
+    )
 
     await MongoDB.save_conversation(
         session_id=session_id,
@@ -525,11 +544,9 @@ async def create_stream(query: str, session_id: str = "default",
     logger.info("create_stream called — session='%s', user='%s', query='%s', model='%s', mode='%s', as_of=%s, watchlist=%s",
                 session_id, user_id or "anonymous", query[:100], model_id or "default", mode, as_of_date, watchlist_id)
 
-    profile: dict | None = await MongoDB.get_profile(user_id) if user_id else None
-
-    dynamic_context, _ = await _build_dynamic_context(
+    dynamic_context, _, profile = await _build_dynamic_context(
         session_id, query, response_format=response_format, user_id=user_id,
-        as_of_date=as_of_date, watchlist_id=watchlist_id, profile=profile,
+        as_of_date=as_of_date, watchlist_id=watchlist_id,
     )
     enriched_query = dynamic_context + query
     agent = get_agent(mode)
@@ -555,11 +572,9 @@ async def stream_for_a2a(query: str, *, session_id: str = "default",
         "stream_for_a2a called — session='%s', user='%s', query='%s', mode='%s'",
         session_id, user_id or "anonymous", query[:100], mode,
     )
-    profile: dict | None = await MongoDB.get_profile(user_id) if user_id else None
-
-    dynamic_context, _ = await _build_dynamic_context(
+    dynamic_context, _, profile = await _build_dynamic_context(
         session_id, query, response_format=response_format, user_id=user_id,
-        as_of_date=as_of_date, watchlist_id=watchlist_id, profile=profile,
+        as_of_date=as_of_date, watchlist_id=watchlist_id,
     )
     enriched_query = dynamic_context + query
     agent = get_agent(mode)
@@ -582,7 +597,9 @@ async def stream_for_a2a(query: str, *, session_id: str = "default",
         session_id, len(stream.steps), len(response_text),
     )
 
-    save_memory(user_id=user_id or session_id, query=query, response=response_text)
+    asyncio.get_event_loop().create_task(
+        asyncio.to_thread(save_memory, user_id=user_id or session_id, query=query, response=response_text)
+    )
     try:
         await MongoDB.save_conversation(
             session_id=session_id,
