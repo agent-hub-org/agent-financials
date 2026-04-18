@@ -13,6 +13,7 @@ from cachetools import TTLCache
 from agent_sdk.agents import BaseAgent
 from agent_sdk.checkpoint import AsyncMongoDBSaver
 from agent_sdk.database.memory import get_memories, save_memory
+from agent_sdk.memory import SemanticMemoryManager
 from database.mongo import MongoDB
 from database.profile import derive_output_mode, profile_context_summary
 
@@ -158,6 +159,14 @@ MCP_SERVERS = {
 
 _agent_instances: dict[str, BaseAgent] = {}
 _checkpointer: AsyncMongoDBSaver | None = None
+_semantic_memory: SemanticMemoryManager | None = None
+
+
+def _get_semantic_memory() -> SemanticMemoryManager:
+    global _semantic_memory
+    if _semantic_memory is None:
+        _semantic_memory = SemanticMemoryManager()
+    return _semantic_memory
 
 # ── Pattern detectors ──────────────────────────────────────────
 
@@ -301,6 +310,7 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
             checkpointer=_get_checkpointer(),
             mode=mode,
             streaming_nodes=None,  # Defaults to DEFAULT_STREAMING_NODES (all phases)
+            semantic_memory=_get_semantic_memory(),
         )
     return _agent_instances[mode]
 
@@ -534,7 +544,7 @@ async def run_query(query: str, session_id: str = "default",
         result = await agent.arun(
             enriched_query, session_id=session_id,
             system_prompt=_build_system_prompt(profile, mode=mode),
-            model_id=model_id, as_of_date=as_of_date,
+            model_id=model_id, as_of_date=as_of_date, user_id=user_id,
         )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
@@ -571,7 +581,7 @@ async def create_stream(query: str, session_id: str = "default",
     return agent.astream(
         enriched_query, session_id=session_id,
         system_prompt=_build_system_prompt(profile, mode=mode),
-        model_id=model_id, as_of_date=as_of_date,
+        model_id=model_id, as_of_date=as_of_date, user_id=user_id,
     )
 
 
@@ -599,7 +609,7 @@ async def stream_for_a2a(query: str, *, session_id: str = "default",
     stream = agent.astream(
         enriched_query, session_id=session_id,
         system_prompt=_build_system_prompt(profile, mode=mode),
-        model_id=model_id, as_of_date=as_of_date,
+        model_id=model_id, as_of_date=as_of_date, user_id=user_id,
     )
 
     response_parts: list[str] = []
