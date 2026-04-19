@@ -16,6 +16,7 @@ from agent_sdk.database.memory import get_memories, save_memory
 from agent_sdk.memory import SemanticMemoryManager
 from database.mongo import MongoDB
 from database.profile import derive_output_mode, profile_context_summary
+from tools.investment_report import generate_investment_report
 
 logger = logging.getLogger("agent_financials.agent")
 
@@ -73,7 +74,18 @@ SYSTEM_PROMPT = (
 
     "### CITATIONS\n"
     "Ground every factual claim in tool results with [n] inline markers.\n"
-    "Append a 'Sources' header at the end listing titles and full URLs."
+    "Append a 'Sources' header at the end listing titles and full URLs.\n\n"
+
+    "### DATA FRESHNESS\n"
+    "At the bottom of every response containing financial data or market metrics, "
+    "add exactly one line: `*Data sourced: [today's date from context]*`. "
+    "This builds trust and protects against stale-data misinterpretation.\n\n"
+
+    "### INVESTMENT REPORT TOOL\n"
+    "When the user asks to 'generate a report', 'export', 'download', or 'save' an analysis, "
+    "compile your full analysis as structured markdown and call `generate_investment_report`. "
+    "Choose format='pdf' by default. Include all sections: executive summary, financials, "
+    "catalysts, risks, and mentor's verdict. Always include the ticker in the title."
 )
 
 # Phase-specific guidance injected into the system prompt for financial_analyst mode.
@@ -303,7 +315,7 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
     if mode not in _agent_instances:
         logger.info("Creating agent singleton (mode=%s) with MCP servers", mode)
         _agent_instances[mode] = BaseAgent(
-            tools=[],
+            tools=[generate_investment_report],
             mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
             provider="azure",

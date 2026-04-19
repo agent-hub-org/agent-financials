@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
+from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from agent_sdk.database.mongo import BaseMongoDatabase
 
 logger = logging.getLogger("agent_financials.mongo")
@@ -10,17 +11,33 @@ _DB_NAME = os.getenv("MONGO_DB_NAME", "agent_financials")
 
 
 class MongoDB(BaseMongoDatabase):
+    _gridfs: AsyncIOMotorGridFSBucket | None = None
+
     @classmethod
     def db_name(cls) -> str:
         return _DB_NAME
 
     @classmethod
+    def _db(cls):
+        return cls.get_client()[cls.db_name()]
+
+    @classmethod
+    def _gridfs_bucket(cls) -> AsyncIOMotorGridFSBucket:
+        if cls._gridfs is None:
+            cls._gridfs = AsyncIOMotorGridFSBucket(cls._db())
+        return cls._gridfs
+
+    @classmethod
+    def _files(cls):
+        return cls._db()["files"]
+
+    @classmethod
     def watchlist_collection(cls):
-        return cls.get_client()[cls.db_name()]["watchlists"]
+        return cls._db()["watchlists"]
 
     @classmethod
     def profile_collection(cls):
-        return cls.get_client()[cls.db_name()]["profiles"]
+        return cls._db()["profiles"]
 
     @classmethod
     async def get_profile(cls, user_id: str) -> dict | None:
@@ -113,6 +130,43 @@ class MongoDB(BaseMongoDatabase):
         return result.deleted_count > 0
 
     @classmethod
+    async def store_file(
+        cls,
+        file_id: str,
+        filename: str,
+        data: bytes,
+        file_type: str,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        bucket = cls._gridfs_bucket()
+        await bucket.upload_from_stream(
+            file_id,
+            data,
+            metadata={"file_id": file_id, "original_filename": filename,
+                       "file_type": file_type, "session_id": session_id, "user_id": user_id},
+        )
+        await cls._files().insert_one({
+            "file_id": file_id, "filename": filename, "file_type": file_type,
+            "session_id": session_id, "user_id": user_id,
+            "created_at": datetime.now(timezone.utc),
+        })
+
+    @classmethod
+    async def retrieve_file(cls, file_id: str) -> tuple[bytes, dict] | None:
+        bucket = cls._gridfs_bucket()
+        try:
+            stream = await bucket.open_download_stream_by_name(file_id)
+            data = await stream.read()
+            meta = await cls._files().find_one({"file_id": file_id}, {"_id": 0})
+            return data, meta or {}
+        except Exception:
+            logger.warning("File not found in GridFS: file_id='%s'", file_id)
+            return None
+
+    @classmethod
     async def ensure_indexes(cls) -> None:
         await super().ensure_indexes()
         await cls.profile_collection().create_index("user_id", unique=True)
+        await cls._files().create_index("created_at", expireAfterSeconds=2_592_000)
+        await cls._db()["fs.files"].create_index("uploadDate", expireAfterSeconds=2_592_000)

@@ -514,6 +514,22 @@ async def delete_watchlist(watchlist_id: str, request: Request):
     return {"success": True}
 
 
+@app.get("/download/{file_id}")
+async def download_report(file_id: str):
+    """Download a generated investment report by its file_id."""
+    result = await MongoDB.retrieve_file(file_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    data, meta = result
+    filename = meta.get("filename", "report")
+    media_type = "application/pdf" if filename.endswith(".pdf") else "text/markdown"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/metrics")
 async def metrics():
     content, content_type = metrics_response()
