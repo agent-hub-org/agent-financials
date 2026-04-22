@@ -184,6 +184,17 @@ class WatchlistUpdate(BaseModel):
     tickers: list[str | WatchlistTickerItem] | None = None
 
 
+class HoldingCreate(BaseModel):
+    ticker: str
+    quantity: float = Field(gt=0)
+    avg_buy_price: float = Field(gt=0)
+
+
+class HoldingUpdate(BaseModel):
+    quantity: float | None = Field(default=None, gt=0)
+    avg_buy_price: float | None = Field(default=None, gt=0)
+
+
 class AskResponse(BaseModel):
     session_id: str
     query: str
@@ -514,7 +525,96 @@ async def delete_watchlist(watchlist_id: str, request: Request):
     return {"success": True}
 
 
-@app.get("/download/{file_id}")
+# ── Holdings Endpoints ──
+
+@app.post("/holdings")
+async def create_holding(body: HoldingCreate, request: Request):
+    user_id = _require_user_id(request)
+    inserted_id = await MongoDB.create_holding(user_id, body.ticker, body.quantity, body.avg_buy_price)
+    return {"id": inserted_id}
+
+@app.get("/holdings")
+async def list_holdings(request: Request):
+    user_id = _require_user_id(request)
+    holdings = await MongoDB.get_holdings(user_id)
+    return {"holdings": holdings}
+
+@app.put("/holdings/{holding_id}")
+async def update_holding(holding_id: str, body: HoldingUpdate, request: Request):
+    user_id = _require_user_id(request)
+    success = await MongoDB.update_holding(user_id, holding_id, body.quantity, body.avg_buy_price)
+    if not success:
+        raise HTTPException(status_code=404, detail="Holding not found or unauthorized")
+    return {"success": True}
+
+@app.delete("/holdings/{holding_id}")
+async def delete_holding(holding_id: str, request: Request):
+    user_id = _require_user_id(request)
+    success = await MongoDB.delete_holding(user_id, holding_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Holding not found or unauthorized")
+    return {"success": True}
+
+@app.get("/holdings/performance")
+async def get_portfolio_performance(request: Request):
+    """Fetch live prices for all holdings and compute portfolio-level P&L."""
+    user_id = _require_user_id(request)
+    holdings = await MongoDB.get_holdings(user_id)
+    results = []
+    total_invested = 0.0
+    total_current_value = 0.0
+    total_day_change = 0.0
+
+    for h in holdings:
+        ticker = h["ticker"]
+        quantity = h["quantity"]
+        avg_buy_price = h["avg_buy_price"]
+        invested = quantity * avg_buy_price
+        total_invested += invested
+
+        current_price = day_change_pct = total_pnl = total_pnl_pct = None
+        current_value = None
+        try:
+            fi = yf.Ticker(ticker).fast_info
+            current_price = round(float(fi.last_price), 2) if fi.last_price else None
+            if current_price:
+                current_value = round(quantity * current_price, 2)
+                total_current_value += current_value
+                total_pnl = round(current_value - invested, 2)
+                total_pnl_pct = round(((current_price - avg_buy_price) / avg_buy_price) * 100, 2)
+                if fi.previous_close:
+                    day_change_pct = round(((current_price - fi.previous_close) / fi.previous_close) * 100, 2)
+                    day_pnl = round(quantity * (current_price - fi.previous_close), 2)
+                    total_day_change += day_pnl
+        except Exception as e:
+            logger.warning("Price fetch failed for '%s': %s", ticker, e)
+
+        results.append({
+            "id": h["id"],
+            "ticker": ticker,
+            "quantity": quantity,
+            "avg_buy_price": avg_buy_price,
+            "current_price": current_price,
+            "total_invested": round(invested, 2),
+            "current_value": current_value,
+            "day_change_pct": day_change_pct,
+            "total_pnl": total_pnl,
+            "total_pnl_pct": total_pnl_pct,
+        })
+
+    total_pnl = round(total_current_value - total_invested, 2) if total_current_value else None
+    total_pnl_pct = round((total_pnl / total_invested) * 100, 2) if total_pnl is not None and total_invested > 0 else None
+    day_change_pct = round((total_day_change / total_current_value) * 100, 2) if total_current_value > 0 else None
+
+    return {
+        "holdings": results,
+        "total_invested": round(total_invested, 2),
+        "total_current_value": round(total_current_value, 2) if total_current_value else None,
+        "total_pnl": total_pnl,
+        "total_pnl_pct": total_pnl_pct,
+        "day_change_pct": day_change_pct,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
 async def download_report(file_id: str):
     """Download a generated investment report by its file_id."""
     result = await MongoDB.retrieve_file(file_id)

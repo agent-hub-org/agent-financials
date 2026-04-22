@@ -40,6 +40,10 @@ class MongoDB(BaseMongoDatabase):
         return cls._db()["profiles"]
 
     @classmethod
+    def holdings_collection(cls):
+        return cls._db()["holdings"]
+
+    @classmethod
     async def get_profile(cls, user_id: str) -> dict | None:
         return await cls.profile_collection().find_one({"user_id": user_id}, {"_id": 0})
 
@@ -129,6 +133,58 @@ class MongoDB(BaseMongoDatabase):
         result = await cls.watchlist_collection().delete_one({"_id": val, "user_id": user_id})
         return result.deleted_count > 0
 
+    # ── Holdings ──
+
+    @classmethod
+    async def create_holding(cls, user_id: str, ticker: str, quantity: float, avg_buy_price: float) -> str:
+        now = datetime.now(timezone.utc)
+        doc = {
+            "user_id": user_id,
+            "ticker": ticker.upper(),
+            "quantity": quantity,
+            "avg_buy_price": avg_buy_price,
+            "created_at": now,
+            "updated_at": now,
+        }
+        result = await cls.holdings_collection().insert_one(doc)
+        return str(result.inserted_id)
+
+    @classmethod
+    async def get_holdings(cls, user_id: str) -> list[dict]:
+        cursor = cls.holdings_collection().find({"user_id": user_id})
+        docs = await cursor.to_list(length=1000)
+        for doc in docs:
+            doc["id"] = str(doc.pop("_id"))
+        return docs
+
+    @classmethod
+    async def update_holding(cls, user_id: str, holding_id: str, quantity: float | None = None, avg_buy_price: float | None = None) -> bool:
+        from bson import ObjectId
+        updates = {"updated_at": datetime.now(timezone.utc)}
+        if quantity is not None:
+            updates["quantity"] = quantity
+        if avg_buy_price is not None:
+            updates["avg_buy_price"] = avg_buy_price
+        try:
+            val = ObjectId(holding_id)
+        except Exception:
+            return False
+        result = await cls.holdings_collection().update_one(
+            {"_id": val, "user_id": user_id},
+            {"$set": updates}
+        )
+        return result.modified_count > 0
+
+    @classmethod
+    async def delete_holding(cls, user_id: str, holding_id: str) -> bool:
+        from bson import ObjectId
+        try:
+            val = ObjectId(holding_id)
+        except Exception:
+            return False
+        result = await cls.holdings_collection().delete_one({"_id": val, "user_id": user_id})
+        return result.deleted_count > 0
+
     @classmethod
     async def store_file(
         cls,
@@ -170,3 +226,5 @@ class MongoDB(BaseMongoDatabase):
         await cls.profile_collection().create_index("user_id", unique=True)
         await cls._files().create_index("created_at", expireAfterSeconds=2_592_000)
         await cls._db()["fs.files"].create_index("uploadDate", expireAfterSeconds=2_592_000)
+        await cls.watchlist_collection().create_index("user_id")
+        await cls.holdings_collection().create_index([("user_id", 1), ("ticker", 1)], unique=True)
