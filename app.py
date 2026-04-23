@@ -287,7 +287,7 @@ async def ask_stream(body: AskRequest, request: Request):
                 while True:
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
                     # SSE comment (ignored by UI, keeps connection warm)
-                    await queue.put(f": heartbeat {int(asyncio.get_event_loop().time())}\n\n")
+                    await queue.put(f": heartbeat {int(asyncio.get_running_loop().time())}\n\n")
             except asyncio.CancelledError:
                 pass
 
@@ -615,6 +615,8 @@ async def get_portfolio_performance(request: Request):
         "day_change_pct": day_change_pct,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
+
+@app.get("/download/{file_id}")
 async def download_report(file_id: str):
     """Download a generated investment report by its file_id."""
     result = await MongoDB.retrieve_file(file_id)

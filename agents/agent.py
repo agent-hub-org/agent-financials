@@ -263,23 +263,27 @@ RESPONSE_FORMAT_INSTRUCTIONS: dict[str, str] = {
 }
 
 
+import threading
+
 class LockCache:
     def __init__(self, ttl: int = 3600):
         self._locks = {}
         self._timestamps = {}
         self._ttl = ttl
+        self._mutex = threading.Lock()
 
     def get_lock(self, session_id: str) -> asyncio.Lock:
-        now = time.time()
-        expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
-        for sid in expired:
-            if sid in self._locks and not self._locks[sid].locked():
-                del self._locks[sid]
-                del self._timestamps[sid]
-        if session_id not in self._locks:
-            self._locks[session_id] = asyncio.Lock()
-        self._timestamps[session_id] = now
-        return self._locks[session_id]
+        with self._mutex:
+            now = time.time()
+            expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
+            for sid in expired:
+                if sid in self._locks and not self._locks[sid].locked():
+                    del self._locks[sid]
+                    del self._timestamps[sid]
+            if session_id not in self._locks:
+                self._locks[session_id] = asyncio.Lock()
+            self._timestamps[session_id] = now
+            return self._locks[session_id]
 
 _session_locks = LockCache()
 
