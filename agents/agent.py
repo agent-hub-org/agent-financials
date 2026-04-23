@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import string
-import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 import httpx
@@ -263,32 +263,10 @@ RESPONSE_FORMAT_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-import threading
-
-class LockCache:
-    def __init__(self, ttl: int = 3600):
-        self._locks = {}
-        self._timestamps = {}
-        self._ttl = ttl
-        self._mutex = threading.Lock()
-
-    def get_lock(self, session_id: str) -> asyncio.Lock:
-        with self._mutex:
-            now = time.time()
-            expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
-            for sid in expired:
-                if sid in self._locks and not self._locks[sid].locked():
-                    del self._locks[sid]
-                    del self._timestamps[sid]
-            if session_id not in self._locks:
-                self._locks[session_id] = asyncio.Lock()
-            self._timestamps[session_id] = now
-            return self._locks[session_id]
-
-_session_locks = LockCache()
+_session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 def get_session_lock(session_id: str) -> asyncio.Lock:
-    return _session_locks.get_lock(session_id)
+    return _session_locks[session_id]
 
 
 _news_client: httpx.AsyncClient | None = None

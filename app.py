@@ -45,8 +45,14 @@ async def lifespan(app: FastAPI):
     # Connect MCP servers on startup for both modes
     for mode in ("standard", "financial_analyst"):
         agent = get_agent(mode)
-        await agent._ensure_initialized()
-        logger.info("MCP servers connected, agent ready (mode=%s)", mode)
+        try:
+            await agent._ensure_initialized()
+            if getattr(agent, '_degraded', False):
+                logger.warning("Agent started in DEGRADED mode — MCP tools unavailable (mode=%s)", mode)
+            else:
+                logger.info("MCP servers connected, agent ready (mode=%s)", mode)
+        except Exception as e:
+            logger.error("Agent initialization failed (continuing without MCP, mode=%s): %s", mode, e)
     await MongoDB.ensure_indexes()
     yield
     # Disconnect MCP on shutdown for all initialized agents
@@ -272,13 +278,11 @@ async def ask_stream(body: AskRequest, request: Request):
                            watchlist_id=body.watchlist_id, as_of_date=body.as_of_date)
 
     _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "600"))
-
     _PROGRESS_PREFIX = "__PROGRESS__:"
 
     async def event_stream():
         full_response = []
-        queue = asyncio.Queue()
-        _PROGRESS_PREFIX = "__PROGRESS__:"
+        queue = asyncio.Queue(maxsize=100)
         _HEARTBEAT_INTERVAL = 15.0  # seconds
 
         async def heartbeat_worker():
@@ -297,7 +301,11 @@ async def ask_stream(body: AskRequest, request: Request):
                 async with get_session_lock(session_id):
                     async with asyncio.timeout(_STREAM_TIMEOUT):
                         async for chunk in stream:
-                            await queue.put(chunk)
+                            try:
+                                await asyncio.wait_for(queue.put(chunk), timeout=30.0)
+                            except asyncio.TimeoutError:
+                                logger.warning("Stream queue full for session='%s' — client likely disconnected", session_id)
+                                return
             except TimeoutError:
                 logger.error("Stream timed out after %.0fs for session='%s'", _STREAM_TIMEOUT, session_id)
                 await queue.put(f"__ERROR__:Response timed out after {_STREAM_TIMEOUT:.0f} seconds.")
@@ -306,7 +314,10 @@ async def ask_stream(body: AskRequest, request: Request):
                 await queue.put("__ERROR__:An internal error occurred while generating the response.")
             finally:
                 # Signal completion to the main consumer
-                await queue.put(None)
+                try:
+                    queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
 
         # Start workers
         heartbeat_task = asyncio.create_task(heartbeat_worker())
@@ -354,7 +365,11 @@ async def ask_stream(body: AskRequest, request: Request):
 
         finally:
             heartbeat_task.cancel()
-            await agent_task  # Ensure agent worker is cleaned up
+            agent_task.cancel()
+            try:
+                await agent_task
+            except asyncio.CancelledError:
+                pass
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -408,7 +423,7 @@ async def get_chart_data(ticker: str, period: str = "1y"):
         )
     logger.info("GET /charts/%s?period=%s", ticker, period)
     try:
-        data = fetch_chart_data(ticker, period)
+        data = await asyncio.to_thread(fetch_chart_data, ticker, period)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except RuntimeError as e:
