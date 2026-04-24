@@ -45,7 +45,7 @@ limiter = Limiter(key_func=get_remote_address_or_user)
 async def lifespan(app: FastAPI):
     validate_required_env_vars(
         ["MONGO_URI", "AZURE_AI_FOUNDRY_ENDPOINT", "AZURE_AI_FOUNDRY_API_KEY",
-         "MEM0_API_KEY", "PINECONE_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY"],
+         "MEM0_API_KEY", "PINECONE_API_KEY"],
         "agent-financials",
     )
     if not os.getenv("INTERNAL_API_KEY"):
